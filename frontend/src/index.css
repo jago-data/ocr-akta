@@ -1,0 +1,71 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root { color-scheme: light; }
+  html, body, #root { height: 100%; }
+  body {
+    @apply bg-canvas text-ink antialiased font-sans;
+    /* Two barely-there washes so the white surfaces read as paper on a tinted desk. */
+    background-image:
+      radial-gradient(880px 460px at 10% -12%, rgba(212, 32, 48, 0.07), transparent 62%),
+      radial-gradient(720px 420px at 92% -6%, rgba(22, 50, 92, 0.07), transparent 58%);
+    background-attachment: fixed;
+  }
+  ::selection { background: rgba(212, 32, 48, .18); }
+  input, select, textarea, button { font: inherit; }
+}
+
+@layer components {
+  /* One surface used by every panel — borders carry structure, shadows stay subtle. */
+  .panel {
+    @apply rounded-2xl border border-line bg-paper shadow-panel;
+  }
+  .chip {
+    @apply inline-flex items-center gap-1.5 rounded-full border border-line bg-paper px-2.5 py-1
+           text-[11px] font-medium text-ink-soft;
+  }
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-3.5 py-2 text-sm
+           font-medium transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed
+           active:scale-[.97];
+  }
+  .btn-primary { @apply btn bg-brand text-white hover:bg-brand-dark shadow-panel; }
+  .btn-ghost   { @apply btn border border-line bg-paper text-ink-soft hover:text-ink hover:border-navy-light; }
+  .label       { @apply text-[10px] font-semibold uppercase tracking-[0.14em] text-ink-faint; }
+  .field {
+    @apply mt-1.5 w-full rounded-xl border border-line bg-surface px-3 py-2.5 text-sm text-ink
+           outline-none transition focus:border-navy-light focus:bg-paper
+           focus:shadow-[0_0_0_3px_rgba(22,50,92,0.14)];
+  }
+  .stagger > * { animation-delay: calc(var(--step, 70ms) * var(--i, 0)); }
+  .lift { @apply transition-transform duration-200 hover:-translate-y-0.5; }
+}
+
+/* Anyone who asked their OS to stop motion gets a static interface. */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: .001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .001ms !important;
+  }
+}
+
+/* Repaint Chrome's yellow autofill in our own surface colour. */
+input:-webkit-autofill,
+input:-webkit-autofill:hover,
+input:-webkit-autofill:focus {
+  -webkit-text-fill-color: #10203F;
+  -webkit-box-shadow: 0 0 0 1000px #F7F9FC inset;
+  box-shadow: 0 0 0 1000px #F7F9FC inset;
+  caret-color: #10203F;
+  transition: background-color 9999s ease-in-out 0s;
+}
+
+/* Thin neutral scrollbars so scrolling panels don't draw heavy gutters. */
+* { scrollbar-width: thin; scrollbar-color: #C6D0E0 transparent; }
+*::-webkit-scrollbar { width: 9px; height: 9px; }
+*::-webkit-scrollbar-thumb { background: #C6D0E0; border-radius: 8px; }
+*::-webkit-scrollbar-thumb:hover { background: #AEBBD0; }
+*::-webkit-scrollbar-track { background: transparent; }

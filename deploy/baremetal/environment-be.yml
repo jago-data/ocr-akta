@@ -1,0 +1,6 @@
+# Backend conda env. No `channels:` key on purpose — resolves through a corporate
+# conda mirror (Nexus) as well as public conda-forge (air-gap requirement).
+name: akta-be
+dependencies:
+  - python=3.11
+  - pip

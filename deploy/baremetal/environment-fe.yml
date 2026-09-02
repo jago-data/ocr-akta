@@ -1,0 +1,6 @@
+# Frontend conda env. No `channels:` key on purpose — resolves through a corporate
+# conda mirror (Nexus) as well as public conda-forge (air-gap requirement).
+name: akta-fe
+dependencies:
+  - nodejs=22
+  - nginx

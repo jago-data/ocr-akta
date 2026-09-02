@@ -1,0 +1,40 @@
+# --- runtime state: machine-specific, holds PII (akta records, NIK, addresses) ---
+backend/data/
+backend/data/jobs/
+backend/data/uploads/
+backend/data/usage_log.jsonl
+usage.json
+
+# --- local config (secrets) — .env.example is the tracked template ---
+.env
+
+# --- local test suite ---
+backend/tests/
+
+# --- assistant notes ---
+claude.md
+CLAUDE.md
+.claude/
+
+# --- dummy / mock API stubs and fixtures (never ship to production) ---
+dummy/
+dummy_*/
+*_dummy/
+mock/
+mock_api/
+dummy_api/
+*.dummy.json
+sample_akta/
+
+# --- python ---
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# --- node / vite ---
+frontend/node_modules/
+frontend/dist/
+
+# --- editor/OS noise ---
+.DS_Store
+*.swp

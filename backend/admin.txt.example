@@ -1,0 +1,4 @@
+# One username per line (case-insensitive). This file IS the admin gate:
+# it is re-read on every /admin/* request, so edits apply immediately.
+# Copy to admin.txt (gitignored) and list the real admin usernames.
+admin
