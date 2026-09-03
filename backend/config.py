@@ -47,7 +47,6 @@ OCR_API_RETRIES = _int("AKTA_OCR_RETRIES", 3)
 # --- Server ---
 HOST = os.environ.get("AKTA_HOST", "0.0.0.0")
 PORT = _int("PORT", 0) or _int("BE_PORT", 8300)
-CORS_ORIGINS = [o.strip() for o in os.environ.get("AKTA_CORS_ORIGINS", "*").split(",") if o.strip()]
 
 # 1 = one shared worklist: every signed-in user sees and can open every job.
 # 0 = each user sees only their own uploads (stricter for PII in production).

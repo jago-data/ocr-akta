@@ -22,7 +22,6 @@ import time
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from starlette.datastructures import UploadFile as StarletteUploadFile
 from fastapi.concurrency import run_in_threadpool
-from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
 import config
@@ -109,13 +108,10 @@ async def _send_413(send) -> None:
     await send({"type": "http.response.body", "body": body})
 
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=config.CORS_ORIGINS,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+# No CORS middleware, deliberately. The browser only ever talks to its own origin: vite
+# proxies /api in dev, nginx proxies /api/ in prod. An Access-Control-Allow-Origin header
+# would buy nothing and cost something — /jobs/{id} returns NIK, addresses and birthdates,
+# and "*" would let any page a signed-in user visits read them.
 # Added LAST so it is OUTERMOST: add_middleware prepends, so the last one added
 # wraps the rest. 16 KB of slack for the multipart envelope around the PDF.
 app.add_middleware(BodySizeLimitMiddleware, max_bytes=config.MAX_UPLOAD_BYTES + 16384)
