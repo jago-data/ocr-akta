@@ -1,0 +1,133 @@
+"""Authentication — the ONE file a deployment replaces to change how users sign in.
+
+server.py depends only on the contract below, so a bank-specific auth_service.py can
+replace this file wholesale and the app keeps working unchanged:
+
+    is_configured() -> bool
+        True when this service verifies credentials for real. False means the app has
+        no directory to check against and falls back to identity capture (below).
+
+    ldap_login_sync(username, password) -> {"username", "display_name", "roles"} | None
+        None on any failure. Blocking — the async wrapper runs it off the event loop.
+
+    async ldap_login(username, password) -> same
+        The one server.py actually calls.
+
+These are the same three names osg-prod's auth_service.py exports, on purpose: the module
+a deployment already runs there can be copied here unchanged (its env vars read OSG_LDAP_*
+rather than AKTA_LDAP_*, so set whichever prefix that copy expects).
+
+The password is passed straight to the directory and is NEVER stored, hashed, logged or
+compared anywhere in this codebase. Admin rights are a separate question entirely, decided
+by data/admin.txt — a directory bind says who you are, not what you may do.
+
+WITHOUT LDAP CONFIGURED is_configured() returns False and server.py decides what to do:
+it accepts identity capture (any non-empty username and password) only when AKTA_DEV_LOGIN=1,
+and otherwise refuses every login. That keeps the fallback a deliberate, visible setting
+rather than something this file does quietly.
+
+Configuration (all optional; LDAP is ON when AKTA_LDAP_SERVER is set and ldap3 imports):
+    AKTA_LDAP_SERVER          host or URL, e.g. "ldaps://ldap.corp.example"
+    AKTA_LDAP_PORT            0 = the scheme's default (389 / 636)
+    AKTA_LDAP_USE_SSL         "1" to force LDAPS when the server is a bare host
+    AKTA_LDAP_USER_DN         bind template with {username}, e.g. "{username}@corp.example"
+    AKTA_LDAP_BASE_DN         search base for profile attributes (empty = skip the search)
+    AKTA_LDAP_SEARCH_FILTER   default "(|(sAMAccountName={username})(uid={username}))"
+    AKTA_LDAP_TIMEOUT         connect/receive seconds (default 5)
+    AKTA_LDAP_WORKERS         thread pool for concurrent binds (default 8)
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+from concurrent.futures import ThreadPoolExecutor
+
+try:
+    import ldap3
+    from ldap3.core.exceptions import LDAPException
+except ImportError:              # dev machines without ldap3 — LDAP is simply off
+    ldap3 = None
+    LDAPException = Exception
+
+_SERVER = os.environ.get("AKTA_LDAP_SERVER", "").strip()
+_PORT = int(os.environ.get("AKTA_LDAP_PORT", "0") or 0) or None
+_USE_SSL = os.environ.get("AKTA_LDAP_USE_SSL", "0") in ("1", "true", "True") \
+    or _SERVER.lower().startswith("ldaps://")
+_USER_DN = os.environ.get("AKTA_LDAP_USER_DN", "{username}").strip()
+_BASE_DN = os.environ.get("AKTA_LDAP_BASE_DN", "").strip()
+_SEARCH_FILTER = os.environ.get(
+    "AKTA_LDAP_SEARCH_FILTER", "(|(sAMAccountName={username})(uid={username}))")
+_TIMEOUT = float(os.environ.get("AKTA_LDAP_TIMEOUT", "5") or 5)
+
+# Bounded pool so a burst of logins does bounded work; further binds queue.
+_EXECUTOR = ThreadPoolExecutor(
+    max_workers=int(os.environ.get("AKTA_LDAP_WORKERS", "8") or 8),
+    thread_name_prefix="akta-login")
+
+# The username goes into a bind DN and a search filter, so only account-name characters
+# are allowed — this is what stops an LDAP injection like "x)(uid=*".
+_SAFE_USERNAME = re.compile(r"^[A-Za-z0-9._@\-]{1,128}$")
+
+
+def is_configured() -> bool:
+    """Whether this service verifies credentials. False = identity capture only."""
+    return bool(_SERVER) and ldap3 is not None
+
+
+def _roles_from_member_of(values) -> list:
+    roles = []
+    for dn in values or []:
+        match = re.search(r"CN=([^,]+)", str(dn), flags=re.I)
+        if match:
+            roles.append(match.group(1))
+    return roles
+
+
+def ldap_login_sync(username: str, password: str) -> dict | None:
+    """Bind as the user. None on any failure — never raises, never logs the password."""
+    username = (username or "").strip()
+    if not username or not password or not _SAFE_USERNAME.match(username):
+        return None
+
+    host = re.sub(r"^ldaps?://", "", _SERVER, flags=re.I).rstrip("/")
+    connection = None
+    try:
+        server = ldap3.Server(host, port=_PORT, use_ssl=_USE_SSL,
+                              connect_timeout=_TIMEOUT, get_info=ldap3.NONE)
+        connection = ldap3.Connection(
+            server, user=_USER_DN.format(username=username), password=password,
+            authentication=ldap3.SIMPLE, receive_timeout=_TIMEOUT, raise_exceptions=False)
+        if not connection.bind():
+            return None
+
+        display_name, roles = "", []
+        if _BASE_DN:
+            try:
+                connection.search(_BASE_DN, _SEARCH_FILTER.format(username=username),
+                                  attributes=["displayName", "cn", "memberOf"])
+                if connection.entries:
+                    entry = connection.entries[0]
+                    display_name = (str(getattr(entry, "displayName", "") or "")
+                                    or str(getattr(entry, "cn", "") or "")).strip()
+                    roles = _roles_from_member_of(getattr(entry, "memberOf", []) or [])
+            except (LDAPException, Exception):
+                pass          # the bind already proved identity; the profile is a bonus
+        return {"username": username,
+                "display_name": display_name or username.title(),
+                "roles": roles}
+    except (LDAPException, Exception):
+        return None
+    finally:
+        if connection is not None:
+            try:
+                connection.unbind()
+            except Exception:
+                pass
+
+
+async def ldap_login(username: str, password: str) -> dict | None:
+    """Off the event loop: a bind against a slow directory would otherwise block every
+    other request in this single-process app for the length of the timeout."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_EXECUTOR, ldap_login_sync, username, password)

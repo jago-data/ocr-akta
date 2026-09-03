@@ -25,8 +25,20 @@ def _int(name: str, default: int) -> int:
 AKTA_OCR_MODE = os.environ.get("AKTA_OCR_MODE", "live").strip().lower()
 
 # --- Internal OCR API (the ONLY outbound call the app makes) ---
+# The PDF goes up as base64 inside a JSON body; see ocr_client for the full contract.
 OCR_API_URL = os.environ.get("AKTA_OCR_API_URL", "").strip()
-OCR_API_KEY = os.environ.get("AKTA_OCR_API_KEY", "").strip()  # sent as x-api-key
+OCR_API_KEY = os.environ.get("AKTA_OCR_API_KEY", "").strip()
+# The header the token travels in. Production reads X-Api-Token; a gateway in front of it
+# may want Authorization or x-api-key instead, and that should not need a code change.
+OCR_API_KEY_HEADER = os.environ.get("AKTA_OCR_API_KEY_HEADER", "X-Api-Token").strip() \
+    or "X-Api-Token"
+# Request envelope fields the API expects on every call. channelId and cif identify the
+# calling system to it; both are site values, and both may legitimately be empty.
+OCR_CHANNEL_ID = os.environ.get("AKTA_OCR_CHANNEL_ID", "").strip()
+OCR_CIF = os.environ.get("AKTA_OCR_CIF", "").strip()
+# Prefix on the referenceNo this app mints per call, so a request can be traced from this
+# app's logs into the API's.
+OCR_REFERENCE_PREFIX = os.environ.get("AKTA_OCR_REFERENCE_PREFIX", "AKTA-")
 OCR_API_TIMEOUT = _int("AKTA_OCR_TIMEOUT_S", 600)
 # Concurrent calls to the OCR API across ALL users (pool size + backpressure):
 OCR_API_CONCURRENCY = _int("AKTA_OCR_CONCURRENCY", 8)
@@ -54,6 +66,10 @@ SHUTDOWN_GRACE_S = _int("AKTA_SHUTDOWN_GRACE_S", 30)
 JOBS_KEEP = _int("AKTA_JOBS_KEEP", 2000)       # oldest job files pruned past this count
 
 # --- Auth ---
+# Accept any non-empty username/password when backend/auth_service.py reports no directory
+# to check against. This is the app's original behaviour and is sound ONLY behind the
+# bank's own access controls; with it off and no LDAP configured, every login is refused.
+DEV_LOGIN = os.environ.get("AKTA_DEV_LOGIN", "1").strip() == "1"
 SESSION_SECRET = os.environ.get("AKTA_SESSION_SECRET", "").strip()
 SESSION_TTL_S = _int("AKTA_SESSION_TTL_HOURS", 12) * 3600
 

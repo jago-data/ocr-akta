@@ -31,7 +31,6 @@ const BOARD_TERM_FIELDS = [
 // every person key from the JSON record except nama/jabatan (the card header)
 // and alamat (full-width at the bottom) — nothing in the record is hidden
 const PERSON_DETAIL_FIELDS = [
-  ['nama_cleaned', 'Nama (Bersih)'],
   ['no_ktp_passport', 'No. KTP / Paspor'],
   ['tempat_lahir', 'Tempat Lahir'],
   ['tanggal_lahir', 'Tanggal Lahir'],
@@ -41,7 +40,7 @@ const PERSON_DETAIL_FIELDS = [
 ]
 
 const EMPTY_PERSON = {
-  nama: '', nama_cleaned: '', jabatan: '', no_ktp_passport: '', tempat_lahir: '',
+  nama: '', jabatan: '', no_ktp_passport: '', tempat_lahir: '',
   tanggal_lahir: '', warga_negara: '', alamat: '', jumlah_lembar_saham: '', persentase_saham: '',
 }
 

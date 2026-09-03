@@ -30,6 +30,17 @@ import jobs
 import ocr_client
 import usage
 
+try:
+    import auth_service
+except ImportError as exc:                                    # noqa: BLE001
+    # Refusing to start is the safe direction. An absent auth module could otherwise be
+    # papered over with a permissive default, and nobody would notice until the audit.
+    raise SystemExit(
+        "backend/auth_service.py is missing — it is gitignored so each deployment keeps "
+        "its own. Copy the template to create it:\n"
+        "    cp backend/auth_service.py.example backend/auth_service.py"
+    ) from exc
+
 app = FastAPI(title="OCR Akta", version="1.0.0")
 
 
@@ -236,19 +247,29 @@ class LoginResponse(BaseModel):
     session_token: str = ""   # unused (kept for client compatibility): no user tokens by design
 
 
-def _authenticate(username: str, password: str) -> dict | None:
-    """Identity capture, NOT credential verification.
+async def _authenticate(username: str, password: str) -> dict | None:
+    """The ONLY credential check in the app — delegated to backend/auth_service.py, which
+    is the file a deployment swaps for the bank's own (same contract as osg-prod). The
+    password is passed through to the directory and is never stored, compared or defined
+    anywhere in this codebase. Admin rights are a separate gate either way: data/admin.txt
+    plus a signed token.
 
-    There is no directory integration by design: the app is deployed behind the
-    bank's own access controls (the same decision that removed per-user tokens),
-    so reaching this endpoint already implies an authorised network position.
-    Anything stronger (SSO, a reverse proxy that injects the user) belongs in
-    front of the app; wire it here if that ever changes. Admin rights are still
-    gated separately by data/admin.txt plus a signed token."""
-    username = (username or "").strip()
-    if not username or not password:
-        return None
-    return {"username": username, "display_name": username.title(), "roles": []}
+    DEV MODE (AKTA_DEV_LOGIN=1, honoured only when the service reports no directory):
+    accept any username with any non-empty password, which is how this app has always
+    behaved and is sound only behind the bank's own access controls."""
+    if getattr(auth_service, "is_configured", lambda: True)():
+        try:
+            return await auth_service.ldap_login(username, password)
+        except Exception as e:                                # noqa: BLE001
+            print(f"  login error: {e}")                      # never the password
+            return None
+    if config.DEV_LOGIN:
+        username = (username or "").strip()
+        if not username or not password:
+            return None
+        return {"username": username, "display_name": username.title(), "roles": []}
+    print("  login refused: no directory configured and AKTA_DEV_LOGIN is off", flush=True)
+    return None
 
 
 @app.post("/auth/login", response_model=LoginResponse)
@@ -263,7 +284,7 @@ async def auth_login(req: LoginRequest, request: Request):
     if not username or not password:
         _record_login_failure(limit_key)
         return LoginResponse(success=False)
-    info = _authenticate(username, password)
+    info = await _authenticate(username, password)
     if not info:
         _record_login_failure(limit_key)
         return LoginResponse(success=False)
@@ -289,11 +310,15 @@ async def _run_job(job: dict, pdf_bytes: bytes) -> None:
         await run_in_threadpool(jobs.save, job)
 
     try:
-        record, n_pages = await ocr_client.extract_akta(
+        record, n_pages, latency = await ocr_client.extract_akta(
             pdf_bytes, label=job["filename"], progress=progress)
         company = record.get("nama_perusahaan", "")
         job.update(status="done", result=record, pages=n_pages,
                    company=company,
+                   # The API's own timing breakdown, kept beside our wall-clock figure:
+                   # when a document is slow, this says whether the time went on the API
+                   # or on the queue in front of it. Operational only, no person data.
+                   latency_data=latency,
                    duration_s=round(time.time() - t0, 2),
                    finished=jobs._now())
         error = ""

@@ -1,14 +1,32 @@
 """Akta extraction — a thin client for the bank's INTERNAL OCR API.
 
-The heavy lifting (OCR, extraction, post-processing) happens inside that API;
-this backend uploads the PDF with the configured x-api-key and stores the
-returned record. AKTA_OCR_MODE=mock keeps the app fully usable with realistic
-dummy data when the API is not reachable (local dev, demos).
+The heavy lifting (OCR, extraction, post-processing) happens inside that API; this
+backend hands it the PDF and stores the record that comes back. AKTA_OCR_MODE=mock
+keeps the app fully usable with realistic dummy data when the API is not reachable
+(local dev, demos).
+
+The wire contract, exactly as production speaks it:
+
+    POST <AKTA_OCR_API_URL>
+    accept: application/json
+    X-Api-Token: <AKTA_OCR_API_KEY>          (header name is configurable)
+    Content-Type: application/json
+    {"channelId": "", "cif": "", "pdf": "data:application/pdf;base64,…",
+     "referenceNo": "…", "transactionDate": "2024-03-14 12:18:40.703"}
+
+    → {"success": true, "result": {…}, "latency_data": {…}, "message": "…"}
+
+The PDF travels as a base64 data URI inside JSON, not as multipart — which costs a
+third more bytes on the wire than the file itself, so the upload cap and the API
+timeout are both sized with that in mind.
 """
 from __future__ import annotations
 
 import asyncio
+import base64
 import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
 
 import fitz  # PyMuPDF — page counting and upload sanity only, no rendering
@@ -16,7 +34,9 @@ import httpx
 
 import config
 
-# The 15-field record contract (the prod API's schema).
+# The record contract — the 16 keys production returns under "result", and the 9 keys
+# each board member carries. Anything outside these lists is dropped by sanitize_record,
+# so an API that grows a field cannot quietly reshape stored jobs.
 RECORD_KEYS = [
     "nama_perusahaan", "nama_perusahaan_cleaned", "nomor_akta", "tanggal_akta",
     "tanggal_perusahaan_berdiri", "tempat_perusahaan_berdiri", "jangka_waktu_perseroan",
@@ -25,9 +45,10 @@ RECORD_KEYS = [
     "tanggal_berlaku_direksi", "tanggal_berlaku_komisaris",
     "board_of_directors", "board_of_commissioners",
     "pengurus_dan_pemegang_saham_tertinggi",
+    "original_filename",
 ]
 PERSON_KEYS = [
-    "nama", "nama_cleaned", "jabatan", "no_ktp_passport", "tempat_lahir",
+    "nama", "jabatan", "no_ktp_passport", "tempat_lahir",
     "tanggal_lahir", "warga_negara", "alamat", "jumlah_lembar_saham", "persentase_saham",
 ]
 ARRAY_STR = {"bidang_industri_perusahaan"}
@@ -157,8 +178,59 @@ ProgressCb = Callable[[str, int, int], Awaitable[None]]  # (stage, done, total)
 # ---------------------------------------------------------------------------
 # Live mode: the internal OCR API
 # ---------------------------------------------------------------------------
+# Jakarta time: transactionDate is read by the API's operators alongside the rest of the
+# bank's logs, which are all WIB. A UTC stamp would be seven hours out in every report.
+WIB = timezone(timedelta(hours=7))
+
+
+def _transaction_date() -> str:
+    """"2024-03-14 12:18:40.703" — the format the API's own example uses, to the
+    millisecond (Python gives microseconds, so the last three digits come off)."""
+    return datetime.now(WIB).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
+
+
+def _reference_no(label: str) -> str:
+    """A per-call id the API echoes into its logs, so one upload here can be found on
+    that side. Prefix is configurable; the tail is random rather than sequential, since
+    two hosts behind a load balancer must not mint the same reference."""
+    return f"{config.OCR_REFERENCE_PREFIX}{uuid.uuid4().hex[:16]}"
+
+
+def build_request(pdf_bytes: bytes, label: str) -> dict:
+    """The JSON body production expects. Split out from the call so a test can assert
+    the shape without a network, and so the encoding cost is visible in one place."""
+    return {
+        "channelId": config.OCR_CHANNEL_ID,
+        "cif": config.OCR_CIF,
+        "pdf": "data:application/pdf;base64," + base64.b64encode(pdf_bytes).decode("ascii"),
+        "referenceNo": _reference_no(label),
+        "transactionDate": _transaction_date(),
+    }
+
+
+def _unwrap(data: dict) -> tuple[dict, dict]:
+    """(record, latency) out of the response envelope.
+
+    `success: false` is a failure even at HTTP 200 — the API answers that way for a PDF
+    it could not read, and treating it as a result would store an empty record as if the
+    extraction had worked. The API's own message is passed through, capped: it explains
+    what went wrong, and an operator has no other way to see it."""
+    if data.get("success") is False:
+        message = str(data.get("message") or "").strip()
+        raise OcrError(f"OCR API refused the document: {message[:300]}" if message
+                       else "OCR API reported success=false with no message")
+    result = data.get("result")
+    if not isinstance(result, dict):
+        # Tolerated on purpose: an older deployment of the API returns the bare record.
+        result = data if data.get("nama_perusahaan") is not None else None
+    if not isinstance(result, dict):
+        raise OcrError("OCR API response carried no result object")
+    latency = data.get("latency_data")
+    return result, latency if isinstance(latency, dict) else {}
+
+
 async def _api_extract(pdf_bytes: bytes, label: str,
-                       progress: ProgressCb | None) -> tuple[dict, int]:
+                       progress: ProgressCb | None) -> tuple[dict, int, dict]:
     if not config.OCR_API_URL:
         raise OcrError("AKTA_OCR_API_URL is not set — configure the internal "
                        "OCR API in .env (or use AKTA_OCR_MODE=mock)")
@@ -166,11 +238,13 @@ async def _api_extract(pdf_bytes: bytes, label: str,
     if progress:
         await progress("extract", 0, 1)
 
-    headers = {}
+    headers = {"accept": "application/json", "Content-Type": "application/json"}
     if config.OCR_API_KEY:
-        headers["x-api-key"] = config.OCR_API_KEY
+        headers[config.OCR_API_KEY_HEADER] = config.OCR_API_KEY
     client, sem = await get_client(), _get_sem()
-    files = {"file": (label or "document.pdf", pdf_bytes, "application/pdf")}
+    # Encoding is CPU-bound and a 30 MB PDF is not free — off the event loop, or every
+    # other request in this process stalls for the duration.
+    body = await asyncio.to_thread(build_request, pdf_bytes, label)
 
     resp = None
     last: Exception | None = None
@@ -179,7 +253,7 @@ async def _api_extract(pdf_bytes: bytes, label: str,
             # the permit covers the call ONLY — holding it across the backoff
             # sleep would let one bad spell drain every slot and stall everyone
             async with sem:
-                resp = await client.post(config.OCR_API_URL, headers=headers, files=files)
+                resp = await client.post(config.OCR_API_URL, headers=headers, json=body)
             if resp.status_code < 500:
                 break  # 2xx/4xx are final answers; only 5xx is worth retrying
             last = OcrError(f"OCR API returned HTTP {resp.status_code}")
@@ -198,12 +272,11 @@ async def _api_extract(pdf_bytes: bytes, label: str,
         raise OcrError("OCR API returned a non-JSON response") from e
     if not isinstance(data, dict):
         raise OcrError("OCR API response is not a JSON object")
-    # accept the record directly or wrapped in a {"result": ...} envelope
-    record = data.get("result") if isinstance(data.get("result"), dict) else data
+    record, latency = _unwrap(data)
 
     if progress:
         await progress("extract", 1, 1)
-    return sanitize_record(record), n_pages
+    return sanitize_record(record), n_pages, latency
 
 
 # ---------------------------------------------------------------------------
@@ -228,14 +301,14 @@ def _mock_record(label: str) -> dict:
         "masa_berlaku_direksi_dalam_tahun": "5",
         "masa_berlaku_komisaris_dalam_tahun": "5",
         "board_of_directors": [{
-            "nama": "TUAN BUDI SANTOSO", "nama_cleaned": "BUDI SANTOSO",
+            "nama": "TUAN BUDI SANTOSO",
             "jabatan": "DIREKTUR UTAMA", "no_ktp_passport": "3173022106850003",
             "tempat_lahir": "SURABAYA", "tanggal_lahir": "1985-06-21",
             "warga_negara": "INDONESIA",
             "alamat": "JALAN KENANGA NOMOR 21, RT 004, RW 006, JAKARTA BARAT",
             "jumlah_lembar_saham": "400", "persentase_saham": "40%",
         }, {
-            "nama": "NONA SARDA HANIRA", "nama_cleaned": "SARDA HANIRA",
+            "nama": "NONA SARDA HANIRA",
             "jabatan": "DIREKTUR", "no_ktp_passport": "3275014502950002",
             "tempat_lahir": "JAKARTA", "tanggal_lahir": "1995-02-05",
             "warga_negara": "INDONESIA",
@@ -243,14 +316,14 @@ def _mock_record(label: str) -> dict:
             "jumlah_lembar_saham": "250", "persentase_saham": "25%",
         }],
         "board_of_commissioners": [{
-            "nama": "NYONYA RATNA DEWI", "nama_cleaned": "RATNA DEWI",
+            "nama": "NYONYA RATNA DEWI",
             "jabatan": "KOMISARIS UTAMA", "no_ktp_passport": "3174045203800004",
             "tempat_lahir": "BANDUNG", "tanggal_lahir": "1980-03-12",
             "warga_negara": "INDONESIA",
             "alamat": "JALAN ANGGREK NOMOR 3, RT 002, RW 001, JAKARTA SELATAN",
             "jumlah_lembar_saham": "200", "persentase_saham": "20%",
         }, {
-            "nama": "TUAN NASRI", "nama_cleaned": "NASRI",
+            "nama": "TUAN NASRI",
             "jabatan": "KOMISARIS", "no_ktp_passport": "3275011511900001",
             "tempat_lahir": "PADANG", "tanggal_lahir": "1990-11-15",
             "warga_negara": "INDONESIA",
@@ -258,11 +331,12 @@ def _mock_record(label: str) -> dict:
             "jumlah_lembar_saham": "150", "persentase_saham": "15%",
         }],
         "pengurus_dan_pemegang_saham_tertinggi": "BUDI SANTOSO",
+        "original_filename": label or "contoh.pdf",
     })
 
 
 async def _mock_extract(pdf_bytes: bytes, label: str,
-                        progress: ProgressCb | None) -> tuple[dict, int]:
+                        progress: ProgressCb | None) -> tuple[dict, int, dict]:
     """Walks the real progress stages with short delays so the UI flow is exercised."""
     async def report(stage: str, done: int, total: int) -> None:
         if progress:
@@ -275,12 +349,17 @@ async def _mock_extract(pdf_bytes: bytes, label: str,
     await report("extract", 0, 1)
     await asyncio.sleep(1.0)
     await report("extract", 1, 1)
-    return _mock_record(label), n_pages
+    # Shaped like the real latency_data so anything reading it works in mock mode too.
+    latency = {"file_name": label, "pdf_to_images_time": 0.0, "images_to_md_time": 0.0,
+               "parallel_prompt_time": 0.0, "total_time": round(0.4 * (n_pages + 1) + 1.0, 2)}
+    return _mock_record(label), n_pages, latency
 
 
 async def extract_akta(pdf_bytes: bytes, label: str = "doc",
-                       progress: ProgressCb | None = None) -> tuple[dict, int]:
-    """One PDF in, (record, page_count) out. Raises OcrError on any failure."""
+                       progress: ProgressCb | None = None) -> tuple[dict, int, dict]:
+    """One PDF in, (record, page_count, latency_data) out. The third value is the API's
+    own timing breakdown — operational metadata, no person data — and is {} when the API
+    does not send one. Raises OcrError on any failure."""
     if config.AKTA_OCR_MODE == "mock":
         return await _mock_extract(pdf_bytes, label, progress)
     return await _api_extract(pdf_bytes, label, progress)

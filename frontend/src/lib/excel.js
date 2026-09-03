@@ -9,7 +9,7 @@ const SCALAR_KEYS = [
   'pengurus_dan_pemegang_saham_tertinggi',
 ]
 const PERSON_KEYS = [
-  'nama', 'nama_cleaned', 'jabatan', 'no_ktp_passport', 'tempat_lahir',
+  'nama', 'jabatan', 'no_ktp_passport', 'tempat_lahir',
   'tanggal_lahir', 'warga_negara', 'alamat', 'jumlah_lembar_saham', 'persentase_saham',
 ]
 

@@ -38,3 +38,7 @@ frontend/dist/
 # --- editor/OS noise ---
 .DS_Store
 *.swp
+
+# Authentication is site-specific: production runs the bank's own module, which a pull
+# must not overwrite. auth_service.py.example is the tracked template.
+backend/auth_service.py
