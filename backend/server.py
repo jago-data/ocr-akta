@@ -122,8 +122,13 @@ ADMIN_USERS_FILE = os.path.join(DATA_DIR, "admin.txt")
 # so it is required rather than generated.
 if not config.SESSION_SECRET:
     raise RuntimeError(
-        "AKTA_SESSION_SECRET is required (admin tokens would not survive a "
-        "restart without it). Set it in .env.")
+        "AKTA_SESSION_SECRET is empty. It signs admin dashboard session tokens, and is "
+        "required rather than generated per boot because a fresh key would invalidate "
+        "every admin session on every restart. Any long random string will do:\n"
+        "    python3 -c \"import secrets; print(secrets.token_urlsafe(32))\"\n"
+        "Put it in .env as AKTA_SESSION_SECRET=<value>. Behind a load balancer, every "
+        "instance must carry the SAME value or sessions break as requests move between "
+        "them. (deploy/baremetal/install-be.sh generates one when it creates .env.)")
 _SESSION_SECRET = config.SESSION_SECRET
 
 # Process-wide admission control: bounds how many uploads are resident at once,

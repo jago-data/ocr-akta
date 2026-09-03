@@ -55,6 +55,17 @@ ENV_FILE="$REPO_ROOT/.env"
 if [ ! -f "$ENV_FILE" ]; then
   cp "$REPO_ROOT/.env.example" "$ENV_FILE"
   echo "    created $ENV_FILE from .env.example — FILL IN AKTA_OCR_API_URL + AKTA_OCR_API_KEY."
+  # .env.example ships this blank, and the server REFUSES TO START without it — so a
+  # host that copies the example and changes nothing else fails at import with an error
+  # about a value nobody chose. It is an arbitrary random string, so generate one.
+  if [ -z "$(_grep_env AKTA_SESSION_SECRET "$ENV_FILE" || true)" ]; then
+    _secret="$("$CONDA_EXE" run --no-capture-output -n "$BE_ENV" \
+               python -c 'import secrets; print(secrets.token_urlsafe(32))' 2>/dev/null \
+               || head -c 32 /dev/urandom | base64 | tr -d '=+/' )"
+    set_env_var AKTA_SESSION_SECRET "$_secret" "$ENV_FILE"
+    echo "    generated AKTA_SESSION_SECRET (signs admin dashboard tokens)."
+    echo "    Behind a load balancer, every instance must carry the SAME value."
+  fi
 fi
 
 # ── Site-specific files, gitignored so a pull never overwrites what a deployment set.
@@ -90,7 +101,7 @@ _need() {  # _need VAR "hint"
 }
 _need AKTA_OCR_API_URL     "extraction cannot run — this is the app's only outbound call."
 _need AKTA_OCR_API_KEY     "the OCR API will reject every request as unauthenticated."
-_need AKTA_SESSION_SECRET  "admin dashboard sessions end at every restart."
+_need AKTA_SESSION_SECRET  "the backend WILL NOT START — see the hint it prints."
 echo "    All config (OCR API, auth, limits, branding, deploy vars) lives in this one"
 echo "    $ENV_FILE — see .env.example. No config.yaml."
 
