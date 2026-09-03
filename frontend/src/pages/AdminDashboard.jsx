@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Activity, CheckCircle2, Clock, Download, FileText, LayoutDashboard, Layers,
-  LogOut, ScanText, Users, XCircle,
+  LogOut, ScanText, Trash2, Users, XCircle,
 } from 'lucide-react'
 import clsx from 'clsx'
 import * as XLSX from 'xlsx'
@@ -183,7 +183,34 @@ export default function AdminDashboard({ onLogout }) {
   const [view, setView] = useState('overview')
   const [events, setEvents] = useState([])
   const [error, setError] = useState('')
+  const [clearing, setClearing] = useState(false)
+  // Two-step, because this cannot be undone: the first press arms, the second commits.
+  // Disarms on its own so a stray click cannot leave a live delete button sitting there.
+  const [armed, setArmed] = useState(false)
   const stamp = useRef('')
+
+  async function clearFailed() {
+    setClearing(true)
+    try {
+      const r = await fetch('/api/admin/usage/clear-failed', {
+        method: 'POST', headers: adminHeaders(),
+      })
+      if (r.status === 401) { setError('Your admin session has expired. Please sign in again.'); return }
+      if (!r.ok) { setError('Could not clear the failed events. Please try again.'); return }
+      setArmed(false)
+      await load()
+    } catch {
+      setError('Could not reach the server.')
+    } finally {
+      setClearing(false)
+    }
+  }
+
+  useEffect(() => {
+    if (!armed) return undefined
+    const t = setTimeout(() => setArmed(false), 5000)
+    return () => clearTimeout(t)
+  }, [armed])
 
   const load = useCallback(async () => {
     try {
@@ -210,6 +237,9 @@ export default function AdminDashboard({ onLogout }) {
   }, [load])
 
   const stats = useMemo(() => computeStats(events), [events])
+  // computeStats already counts these; naming it here keeps the button honest about how
+  // many records it is about to delete.
+  const failedCount = stats.failed
   const recent = useMemo(() => [...events].reverse().slice(0, 100), [events])
   const userRows = useMemo(
     () => Object.values(stats.byUser).sort((a, b) => b.total - a.total),
@@ -348,9 +378,30 @@ export default function AdminDashboard({ onLogout }) {
 
         {view === 'activity' && (
           <div className="mx-auto max-w-5xl space-y-4">
-            <header className="animate-fade-up">
-              <h1 className="text-[19px] font-semibold text-ink">Recent activity</h1>
-              <p className="mt-0.5 text-[13px] text-ink-soft">The last 100 extraction events.</p>
+            <header className="animate-fade-up flex flex-wrap items-end justify-between gap-3">
+              <div>
+                <h1 className="text-[19px] font-semibold text-ink">Recent activity</h1>
+                <p className="mt-0.5 text-[13px] text-ink-soft">The last 100 extraction events.</p>
+              </div>
+              {failedCount > 0 && (
+                <div className="flex items-center gap-2">
+                  {armed && (
+                    <span className="text-[12px] text-ink-soft">
+                      Deletes {failedCount} record{failedCount > 1 ? 's' : ''} permanently.
+                    </span>
+                  )}
+                  <button onClick={armed ? clearFailed : () => setArmed(true)} disabled={clearing}
+                          className={armed ? 'btn bg-alert text-white hover:opacity-90' : 'btn-ghost'}>
+                    <Trash2 size={14} />
+                    {clearing ? 'Clearing…'
+                      : armed ? 'Yes, delete them'
+                        : `Clear ${failedCount} failed`}
+                  </button>
+                  {armed && !clearing && (
+                    <button onClick={() => setArmed(false)} className="btn-ghost">Cancel</button>
+                  )}
+                </div>
+              )}
             </header>
             <div className="panel animate-fade-up overflow-x-auto p-5">
               <table className="min-w-full text-[12.5px]">

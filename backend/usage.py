@@ -47,6 +47,48 @@ def log_event(username: str, filename: str, *, job_id: str = "", pages: int = 0,
         print(f"  usage log skipped: {e}", flush=True)
 
 
+# What the dashboard calls a success. Kept here beside the writer so the definition
+# cannot drift from the one the UI uses to colour a row.
+OK_STATUSES = ("done", "ok")
+
+
+def clear_failed() -> int:
+    """Drop every failed event from the log, keeping the successes. Returns how many
+    lines were removed.
+
+    IRREVERSIBLE: this log is the only record those extractions ever ran, so the caller
+    is expected to have confirmed with a human first. Written to a temp file and moved
+    into place under the append lock, so a crash mid-rewrite leaves the original intact
+    and no concurrent log_event is lost."""
+    if not os.path.exists(LOG_PATH):
+        return 0
+    with _lock:
+        kept, removed = [], 0
+        try:
+            with open(LOG_PATH, "r", encoding="utf-8") as f:
+                for line in f:
+                    if not line.strip():
+                        continue
+                    try:
+                        rec = json.loads(line)
+                    except Exception:
+                        kept.append(line)          # unparseable: not ours to throw away
+                        continue
+                    if rec.get("status") in OK_STATUSES:
+                        kept.append(line)
+                    else:
+                        removed += 1
+        except OSError:
+            return 0
+        if not removed:
+            return 0
+        tmp = LOG_PATH + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(line if line.endswith("\n") else line + "\n" for line in kept)
+        os.replace(tmp, LOG_PATH)
+    return removed
+
+
 def _read() -> list:
     """Most-recent MAX_EVENTS events; malformed lines are skipped, not fatal."""
     if not os.path.exists(LOG_PATH):

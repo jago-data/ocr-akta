@@ -532,6 +532,15 @@ def admin_analytics():
     return usage.get_analytics()
 
 
+@app.post("/admin/usage/clear-failed", dependencies=[Depends(require_admin)])
+async def admin_clear_failed():
+    """Purge failed extractions from the usage log. The successes, and every job record
+    on disk, are untouched — this only clears the failure noise from the dashboard."""
+    removed = await run_in_threadpool(usage.clear_failed)
+    print(f"  admin cleared {removed} failed usage event(s)", flush=True)
+    return {"removed": removed}
+
+
 @app.get("/admin/analytics/stamp", dependencies=[Depends(require_admin)])
 def admin_analytics_stamp():
     return {"stamp": usage.log_stamp()}
