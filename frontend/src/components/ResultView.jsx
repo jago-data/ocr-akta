@@ -53,12 +53,12 @@ const STAGES = [
 // at: waiting for a concurrency permit and uploading a 40 MB body want opposite fixes, and
 // from a single overhead figure they look identical.
 const CLIENT_PHASES = [
-  ['slot_wait_s', 'antre giliran', 'AKTA_CONCURRENT_PER_USER — dokumen lain milik Anda sedang diproses'],
-  ['api_wait_s', 'antre ke API', 'AKTA_OCR_CONCURRENCY — semua slot panggilan API sedang terpakai'],
-  ['read_s', 'baca berkas', 'membaca PDF dari disk'],
-  ['page_count_s', 'hitung halaman', 'membuka PDF untuk menghitung jumlah halaman'],
-  ['encode_s', 'encode base64', 'menyiapkan PDF sebagai base64 di dalam JSON'],
-  ['retry_wait_s', 'jeda ulang', 'jeda sebelum mencoba lagi setelah API mengembalikan 5xx'],
+  ['slot_wait_s', 'queued for a slot', 'AKTA_CONCURRENT_PER_USER — your other documents were still running'],
+  ['api_wait_s', 'waiting for the API', 'AKTA_OCR_CONCURRENCY — every API call slot was in use'],
+  ['read_s', 'read file', 'reading the PDF back off disk'],
+  ['page_count_s', 'count pages', 'opening the PDF to count its pages'],
+  ['encode_s', 'base64 encode', 'preparing the PDF as base64 inside the JSON body'],
+  ['retry_wait_s', 'retry backoff', 'pausing before another attempt after the API returned 5xx'],
 ]
 
 function OutsideApi({ phases, apiTotal }) {
@@ -71,8 +71,8 @@ function OutsideApi({ phases, apiTotal }) {
   const transit = Math.max(0, Number(phases.http_s || 0) - apiTotal)
   if (transit >= 0.05) {
     rows.push({
-      label: 'kirim & antre di API',
-      why: `${phases.body_mb || '?'} MB base64 dikirim ke API, lalu API belum mulai menghitung`,
+      label: 'transit & API queue',
+      why: `${phases.body_mb || '?'} MB of base64 sent to the API, before its own clock started`,
       seconds: transit,
     })
   }
@@ -80,7 +80,7 @@ function OutsideApi({ phases, apiTotal }) {
 
   return (
     <div className="mt-2.5 border-t border-line pt-2">
-      <p className="text-[10.5px] text-ink-faint">Di luar waktu yang dilaporkan API</p>
+      <p className="text-[10.5px] text-ink-faint">Outside the time the API reports</p>
       <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
         {rows.map((row) => (
           <span key={row.label} className="text-[11.5px] text-ink-soft" title={row.why}>
@@ -110,12 +110,12 @@ function StageTimings({ latency, wallClock }) {
     <div className="mt-2.5 rounded-xl border border-line bg-canvas/60 px-3 py-2.5">
       <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
         <span className="label flex items-center gap-1.5">
-          <Gauge size={12} className="text-brand" /> Waktu proses
+          <Gauge size={12} className="text-brand" /> Processing time
         </span>
         <span className="ml-auto text-[11.5px] text-ink-soft">
-          <b className="font-semibold text-ink tabular-nums">{apiTotal.toFixed(1)}s</b> di OCR API
+          <b className="font-semibold text-ink tabular-nums">{apiTotal.toFixed(1)}s</b> in the OCR API
           {overhead > 0.05 && (
-            <> · <span className="tabular-nums">+{overhead.toFixed(1)}s</span> di luar API</>
+            <> · <span className="tabular-nums">+{overhead.toFixed(1)}s</span> outside it</>
           )}
         </span>
       </div>
@@ -492,7 +492,7 @@ export default function ResultView({ job, username, onJobUpdated }) {
             )}
           </h2>
           <p className="mt-0.5 text-[12px] text-ink-faint">
-            {job.filename} · {job.pages} halaman · {job.duration_s}s
+            {job.filename} · {job.pages} pages · {job.duration_s}s
           </p>
           <StageTimings latency={job.latency_data} wallClock={job.duration_s} />
         </div>
