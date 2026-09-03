@@ -1,11 +1,15 @@
 # Extraction rule — `bidang_industri_perusahaan`
 
 **This app does not run prompts.** Extraction is delegated to the internal OCR API, which
-receives the PDF and returns the record, so nothing here is executed locally. This file is
-the *specification* for whoever operates that API: the rule the model must follow for this
-one field, with the reasoning and the test cases. Keep it in step with the API's own prompt
-— when the two disagree, this file is what the reviewers in the Akta app were told to
-expect.
+converts the deed to Markdown and runs its extraction over that, so nothing here is
+executed locally. This file is the *specification* for whoever operates that API: the rule
+the model must follow for this one field, with the reasoning and the test cases. Keep it in
+step with the API's own prompt — when the two disagree, this file is what the reviewers in
+the Akta app were told to expect.
+
+The rule below therefore describes what the model sees in the **Markdown**, not the layout
+of the original scan. Where the two differ — a heading that became a list item, a point
+that wrapped across lines — the Markdown is what to reason about.
 
 Source: **Pasal 3** — *Maksud dan Tujuan serta Kegiatan Usaha*.
 
@@ -62,7 +66,8 @@ deed is exactly one element in the array.
 - Never split one point into several because it contains a comma.
 - Keep the deed's order.
 - Keep duplicates out: the same code twice is one element.
-- A point spanning two lines is still one point — join the lines with a single space.
+- A point wrapped across two lines in the Markdown is still one point — join it with a
+  single space.
 
 ## Test cases from the gold set
 
