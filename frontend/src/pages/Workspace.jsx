@@ -1,7 +1,8 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   ArrowLeft, CheckCircle2, ChevronRight, Clock, Download, FileText, History,
-  LayoutDashboard, Layers, Loader2, LogOut, PencilLine, ScanText, Search, UploadCloud,
+  LayoutDashboard, Layers, Loader2, LogOut, PencilLine, RotateCcw, ScanText, Search,
+  StopCircle, UploadCloud,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { clearSession, session, userHeaders } from '../lib/api'
@@ -123,9 +124,46 @@ export default function Workspace({ onLogout }) {
     if (pdfs.length === 1 && accepted.length === 1) openJob(accepted[0])
   }
 
-  function signOut() {
+  async function signOut() {
+    // Tell the server first: it stops whatever is still extracting for this user, so
+    // nothing keeps burning OCR capacity on a result nobody is waiting for. Best effort
+    // — a failed call must never trap someone in a session they asked to leave.
+    try {
+      await fetch(`/api/auth/logout?username=${encodeURIComponent(user)}`,
+        { method: 'POST', headers: userHeaders() })
+    } catch { /* sign out regardless */ }
     clearSession()
     onLogout()
+  }
+
+  async function stopJob(id) {
+    try {
+      await fetch(`/api/jobs/${id}/stop?username=${encodeURIComponent(user)}`,
+        { method: 'POST', headers: userHeaders() })
+    } catch {
+      setError('Could not stop that document. Please try again.')
+      return
+    }
+    await refresh()
+    if (openRequest.current === id) openJob(id)
+  }
+
+  async function retryJob(id) {
+    try {
+      const r = await fetch(`/api/jobs/${id}/retry?username=${encodeURIComponent(user)}`,
+        { method: 'POST', headers: userHeaders() })
+      if (!r.ok) {
+        const d = await r.json().catch(() => ({}))
+        setError(d.detail || 'Could not run that document again.')
+        return
+      }
+      setError('')
+    } catch {
+      setError('Could not run that document again. Could not reach the server.')
+      return
+    }
+    await refresh()
+    if (openRequest.current === id) openJob(id)
   }
 
   const goTo = (v) => { setSelected(null); openRequest.current = ''; setView(v) }
@@ -196,8 +234,11 @@ export default function Workspace({ onLogout }) {
                   <p className="mb-1 font-semibold">{selected.filename} failed:</p>
                   <p>{selected.error}</p>
                 </div>
+              ) : selected.status === 'stopped' ? (
+                <Stopped job={selected} username={user} onRetry={() => retryJob(selected.id)} />
               ) : (
-                <Processing job={selected} username={user} />
+                <Processing job={selected} username={user}
+                            onStop={() => stopJob(selected.id)} />
               )}
             </div>
           </div>
@@ -207,14 +248,16 @@ export default function Workspace({ onLogout }) {
           <UploadView jobs={jobList} onUpload={upload} uploading={uploading}
                       error={error} onOpen={openJob} />
         ) : (
-          <HistoryView jobs={jobList} onOpen={openJob} user={user} />
+          <HistoryView jobs={jobList} onOpen={openJob} onStop={stopJob}
+                       onRetry={retryJob} user={user} />
         )}
       </main>
     </div>
   )
 }
 
-function Processing({ job, username }) {
+function Processing({ job, username, onStop }) {
+  const [stopping, setStopping] = useState(false)
   const label = job.status === 'ocr'
     ? `Reading page ${job.stage_done} of ${job.stage_total}…`
     : job.status === 'extract'
@@ -226,11 +269,43 @@ function Processing({ job, username }) {
     <div className="space-y-4">
       <div className="flex items-center gap-3 rounded-xl border border-amber/30 bg-amber-tint px-4 py-3">
         <Loader2 size={18} className="animate-spin text-amber" />
-        <div>
+        <div className="min-w-0">
           <p className="text-[13px] font-medium text-ink">{label}</p>
-          <p className="text-[12px] text-ink-faint">{job.filename}</p>
+          <p className="truncate text-[12px] text-ink-faint">{job.filename}</p>
         </div>
+        {/* Stopping is not an error path — someone uploaded the wrong file, or wants the
+            queue behind this one to move. It stays in history and can be run again. */}
+        <button onClick={() => { setStopping(true); onStop() }} disabled={stopping}
+                className="btn-ghost ml-auto shrink-0">
+          <StopCircle size={14} /> {stopping ? 'Stopping…' : 'Stop'}
+        </button>
       </div>
+      <div className="h-[65vh]"><PdfPane jobId={job.id} username={username} /></div>
+    </div>
+  )
+}
+
+
+function Stopped({ job, username, onRetry }) {
+  const [retrying, setRetrying] = useState(false)
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 rounded-xl border border-line bg-canvas px-4 py-3">
+        <StopCircle size={18} className="text-ink-faint" />
+        <div className="min-w-0">
+          <p className="text-[13px] font-medium text-ink">Stopped before it finished</p>
+          <p className="truncate text-[12px] text-ink-faint">
+            {job.filename}
+            {job.error ? ` · ${job.error}` : ''}
+          </p>
+        </div>
+        <button onClick={() => { setRetrying(true); onRetry() }} disabled={retrying}
+                className="btn-primary ml-auto shrink-0">
+          <RotateCcw size={14} /> {retrying ? 'Starting…' : 'Run again'}
+        </button>
+      </div>
+      {/* The upload is kept, which is what makes a re-run possible at all — so it is
+          still worth showing rather than leaving an empty panel. */}
       <div className="h-[65vh]"><PdfPane jobId={job.id} username={username} /></div>
     </div>
   )
@@ -530,7 +605,7 @@ const QUICK_MS = {
   '2d': 2 * DAY_MS, '7d': 7 * DAY_MS, '1mo': 30 * DAY_MS, '3mo': 91 * DAY_MS, '1y': 365 * DAY_MS,
 }
 
-function HistoryView({ jobs, onOpen, user }) {
+function HistoryView({ jobs, onOpen, onStop, onRetry, user }) {
   const [query, setQuery] = useState('')
   const [status, setStatus] = useState('all')
   const [quick, setQuick] = useState('')
@@ -680,15 +755,33 @@ function HistoryView({ jobs, onOpen, user }) {
                   </div>
                 </td>
                 <td className="px-3 py-2.5 text-ink-soft">{j.pages || '-'}</td>
-                <td className="px-3 py-2.5 text-ink-soft">{j.status === 'done' ? `${j.duration_s}s` : '-'}</td>
+                <td className="px-3 py-2.5 text-ink-soft">
+                  {j.status === 'done' || (j.status === 'stopped' && j.duration_s)
+                    ? `${j.duration_s}s` : '-'}
+                </td>
                 <td className="whitespace-nowrap px-3 py-2.5 text-ink-faint">
                   {new Date(j.created).toLocaleString('en-GB')}
                 </td>
-                <td className="px-3 py-2.5">
-                  <span className="inline-flex items-center gap-0.5 text-[11.5px] font-medium text-ink-faint transition-colors group-hover:text-brand">
-                    View
-                    <ChevronRight size={14} className="transition-transform group-hover:translate-x-0.5" />
-                  </span>
+                <td className="px-3 py-2.5" onClick={(e) => e.stopPropagation()}>
+                  <div className="flex items-center justify-end gap-1.5">
+                    {ACTIVE.has(j.status) && (
+                      <button onClick={() => onStop(j.id)} title="Stop this document"
+                              className="text-[11.5px] font-medium text-ink-faint hover:text-alert">
+                        <StopCircle size={14} className="inline" /> Stop
+                      </button>
+                    )}
+                    {j.status === 'stopped' && (
+                      <button onClick={() => onRetry(j.id)} title="Run this document again"
+                              className="text-[11.5px] font-medium text-ink-faint hover:text-brand">
+                        <RotateCcw size={14} className="inline" /> Run again
+                      </button>
+                    )}
+                    <span onClick={() => onOpen(j.id)}
+                          className="inline-flex cursor-pointer items-center gap-0.5 text-[11.5px] font-medium text-ink-faint transition-colors group-hover:text-brand">
+                      View
+                      <ChevronRight size={14} className="transition-transform group-hover:translate-x-0.5" />
+                    </span>
+                  </div>
                 </td>
               </tr>
             ))}

@@ -162,7 +162,15 @@ async def _release_slot(user: str, slot) -> None:
             _user_slots.pop(user, None)
 
 # asyncio.Task objects must stay strongly referenced or GC can drop them mid-run
+# The statuses that mean a job is still going. Named once so the stop guard, the retry
+# guard and jobs.count_active cannot drift apart.
+ACTIVE_STATUSES = ("queued", "ocr", "extract")
+
 _background_tasks: set = set()
+# job_id -> the task running it, so one document can be stopped by name. A cancelled
+# task raises CancelledError inside whatever it is awaiting — including the HTTP call to
+# the OCR API, which aborts the request rather than waiting out its timeout.
+_running: dict = {}
 
 
 # ---------------------------------------------------------------------------
@@ -336,7 +344,17 @@ async def _run_job(job: dict) -> None:
     per user is 300 MB of nothing happening."""
     user = job.get("username") or ""
     queued_at = time.time()
-    slot = await _acquire_slot(user)
+    try:
+        slot = await _acquire_slot(user)
+    except asyncio.CancelledError:
+        # Stopped while still QUEUED. This needs its own handler because the cancellation
+        # lands on the line above — outside the try that wraps the extraction — and
+        # without it the job stayed at "queued" forever with no task left to finish it.
+        job.update(status="stopped", error="", stage_done=0, stage_total=0,
+                   duration_s=0.0, finished=jobs._now())
+        await run_in_threadpool(jobs.save, job)
+        _running.pop(job["id"], None)
+        raise
     slot_wait_s = round(time.time() - queued_at, 2)
     t0 = time.time()
 
@@ -374,6 +392,17 @@ async def _run_job(job: dict) -> None:
         job.update(status="error", error=str(e),
                    duration_s=round(time.time() - t0, 2), finished=jobs._now())
         company, error = "", str(e)
+    except asyncio.CancelledError:
+        # Stopped on purpose — by the user, or by their logout. NOT an error: the PDF
+        # stays on disk and the job stays in history so it can be run again. The state
+        # is written and the slot returned before re-raising, so cancellation cannot
+        # leave a job stuck at "ocr" or wedge that user's remaining slots.
+        job.update(status="stopped", error="", stage_done=0, stage_total=0,
+                   duration_s=round(time.time() - t0, 2), finished=jobs._now())
+        await run_in_threadpool(jobs.save, job)
+        await _release_slot(user, slot)
+        _running.pop(job["id"], None)
+        raise
     except Exception as e:  # unexpected — still recorded, never a silent hang
         job.update(status="error", error=f"internal error: {e}",
                    duration_s=round(time.time() - t0, 2), finished=jobs._now())
@@ -387,6 +416,7 @@ async def _run_job(job: dict) -> None:
     await run_in_threadpool(jobs.save, job)
     await run_in_threadpool(jobs.prune)
     await _release_slot(user, slot)
+    _running.pop(job["id"], None)
 
 
 @app.post("/extract")
@@ -458,7 +488,9 @@ async def _accept_upload(file, name: str, user: str):
     await run_in_threadpool(jobs.save_pdf, job["id"], pdf_bytes)
     task = asyncio.get_running_loop().create_task(_run_job(job))
     _background_tasks.add(task)
+    _running[job["id"]] = task
     task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(lambda _t, jid=job["id"]: _running.pop(jid, None))
     return {"job_id": job["id"], "status": job["status"]}
 
 
@@ -519,6 +551,98 @@ def _commit_edit(job_id: str, user: str, clean: dict) -> dict:
         return job
 
 
+async def _stop_job(job: dict) -> bool:
+    """Cancel one job if it is still running. Returns whether anything was stopped.
+
+    A queued job has a task too — parked on the slot semaphore — so cancelling covers
+    both waiting and running. A job the process no longer has a task for (a restart
+    happened) is marked stopped directly, since nothing else will ever finish it."""
+    task = _running.get(job["id"])
+    if task is not None and not task.done():
+        task.cancel()
+        # Wait for the cancellation to actually land. cancel() only REQUESTS it: the job
+        # writes its stopped state inside its own handler, so returning immediately meant
+        # answering "stopped" while the document was still extracting, and a client that
+        # re-read it straight away saw "ocr". asyncio.wait rather than awaiting the task,
+        # which would re-raise the CancelledError into this request.
+        await asyncio.wait({task}, timeout=config.STOP_GRACE_S)
+        return True
+    if job.get("status") in ACTIVE_STATUSES:
+        job.update(status="stopped", error="", finished=jobs._now())
+        await run_in_threadpool(jobs.save, job)
+        return True
+    return False
+
+
+@app.post("/jobs/{job_id}/stop")
+async def stop_job(job_id: str, username: str = ""):
+    """Stop a document that is queued or extracting. It stays in history as "stopped"
+    with its PDF intact, so it can be run again."""
+    user = _require_user(username)
+    job = await run_in_threadpool(jobs.load, job_id)
+    if not job or not _can_access(job, user):
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.get("status") not in ACTIVE_STATUSES:
+        raise HTTPException(status_code=409,
+                            detail=f"that document is already {job.get('status')}")
+    stopped = await _stop_job(job)
+    print(f"  stopped job {job_id} ({job.get('filename')}) for {user}", flush=True)
+    return {"stopped": stopped, "status": "stopped"}
+
+
+@app.post("/jobs/{job_id}/retry")
+async def retry_job(job_id: str, username: str = ""):
+    """Run a stopped document again. Only stopped ones: a finished job has its record
+    already, and a failed one failed for a reason a retry will not change."""
+    user = _require_user(username)
+    job = await run_in_threadpool(jobs.load, job_id)
+    if not job or not _can_access(job, user):
+        raise HTTPException(status_code=404, detail="job not found")
+    if job.get("status") != "stopped":
+        raise HTTPException(
+            status_code=409,
+            detail="only a stopped document can be run again — this one is "
+                   f"{job.get('status')}")
+    if await run_in_threadpool(jobs.read_pdf, job_id) is None:
+        raise HTTPException(status_code=410,
+                            detail="the uploaded PDF is no longer stored for this document")
+    active = await run_in_threadpool(jobs.count_active, user)
+    if active >= config.MAX_ACTIVE_PER_USER:
+        raise HTTPException(
+            status_code=429,
+            detail=f"You already have {active} document(s) queued or processing — the "
+                   f"limit is {config.MAX_ACTIVE_PER_USER}.")
+    # Back to the start of the queue, with the previous run's timings cleared so the
+    # result panel describes this attempt rather than the abandoned one.
+    job.update(status="queued", error="", stage_done=0, stage_total=0, duration_s=0.0,
+               finished="", latency_data={})
+    await run_in_threadpool(jobs.save, job)
+    task = asyncio.get_running_loop().create_task(_run_job(job))
+    _background_tasks.add(task)
+    _running[job["id"]] = task
+    task.add_done_callback(_background_tasks.discard)
+    task.add_done_callback(lambda _t, jid=job["id"]: _running.pop(jid, None))
+    print(f"  re-running job {job_id} ({job.get('filename')}) for {user}", flush=True)
+    return {"job_id": job_id, "status": "queued"}
+
+
+@app.post("/auth/logout")
+async def auth_logout(username: str = ""):
+    """Signing out stops that user's documents. Otherwise they keep extracting for
+    someone who has left — burning OCR API capacity on a result nobody is waiting for,
+    and holding run slots that other people's uploads are queued behind."""
+    user = _require_user(username)
+    mine = [j for j in await run_in_threadpool(jobs.active_for_user, user)]
+    stopped = 0
+    for summary in mine:
+        job = await run_in_threadpool(jobs.load, summary["id"])
+        if job and await _stop_job(job):
+            stopped += 1
+    if stopped:
+        print(f"  {user} signed out — stopped {stopped} running document(s)", flush=True)
+    return {"stopped": stopped}
+
+
 @app.get("/jobs/{job_id}/pdf")
 async def get_job_pdf(job_id: str, username: str = ""):
     """The original upload, for the in-app PDF viewer. Same ownership check as the job."""
@@ -571,10 +695,12 @@ def app_info():
 async def _startup() -> None:
     """Resolve jobs abandoned by a previous process: without this they poll as
     'queued'/'ocr' forever and never reach a terminal state."""
-    # Run slots are asyncio primitives, so they belong to the loop that created them.
-    # One loop per process in production makes this a no-op; under tests, where each
-    # client spins a fresh loop, it stops a semaphore from a dead loop being awaited.
+    # Run slots and the task registry are asyncio objects, so they belong to the loop
+    # that created them. One loop per process in production makes this a no-op; under
+    # tests, where each client spins a fresh loop, it stops a semaphore or a task from a
+    # dead loop being awaited or cancelled.
     _user_slots.clear()
+    _running.clear()
     n = await run_in_threadpool(jobs.fail_interrupted, "interrupted by a server restart")
     if n:
         print(f"  marked {n} interrupted job(s) as failed", flush=True)

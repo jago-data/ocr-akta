@@ -9,6 +9,11 @@ export default function StatusBadge({ job }) {
   if (s === 'error') {
     return <span className="rounded-full bg-alert-tint px-2 py-0.5 text-[11px] font-semibold text-alert">failed</span>
   }
+  // Stopped is not a failure and not in progress: nothing went wrong, and nothing is
+  // happening. Neutral colouring, because it needs a decision rather than attention.
+  if (s === 'stopped') {
+    return <span className="rounded-full bg-line-soft px-2 py-0.5 text-[11px] font-semibold text-ink-soft">stopped</span>
+  }
   const label = s === 'ocr' ? `reading ${job.stage_done}/${job.stage_total}`
     : s === 'extract' ? `extracting ${job.stage_done}/${job.stage_total}` : 'queued'
   return (

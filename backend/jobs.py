@@ -87,12 +87,25 @@ def _write(job: dict, tmp: str, path: str) -> None:
         raise
 
 
+# Still going. "stopped" is deliberately NOT here: a stopped document holds no slot and
+# counts against no limit, which is what makes stopping a document useful in the first
+# place — it frees the queue for the next one.
+ACTIVE_STATUSES = ("queued", "ocr", "extract")
+
+
 def count_active(username: str) -> int:
     """How many of this user's jobs are still queued or running."""
     u = (username or "").strip().lower()
     return sum(1 for j in _iter_summaries()
                if j.get("username") == u
-               and j.get("status") in ("queued", "ocr", "extract"))
+               and j.get("status") in ACTIVE_STATUSES)
+
+
+def active_for_user(username: str) -> list:
+    """Summaries of this user's still-running jobs — what logout has to stop."""
+    u = (username or "").strip().lower()
+    return [j for j in _iter_summaries()
+            if j.get("username") == u and j.get("status") in ACTIVE_STATUSES]
 
 
 def save_pdf(job_id: str, pdf_bytes: bytes) -> None:
@@ -200,16 +213,18 @@ def _scan_locked():
 
 
 def fail_interrupted(reason: str) -> int:
-    """Flip jobs left mid-flight by a dead process to a terminal error state.
-    Called once at startup — otherwise the UI polls them as 'queued' forever."""
+    """Resolve jobs left mid-flight by a dead process. Marked STOPPED rather than failed:
+    the upload is still on disk and nothing about the document was wrong, so the user can
+    run it again — which is precisely what a restart should leave behind. Called once at
+    startup, otherwise the UI polls them as 'queued' forever."""
     stuck = [j["id"] for j in _iter_summaries()
-             if j.get("status") in ("queued", "ocr", "extract")]
+             if j.get("status") in ACTIVE_STATUSES]
     for job_id in stuck:
         with job_lock(job_id):
             job = load(job_id)
-            if not job or job.get("status") not in ("queued", "ocr", "extract"):
+            if not job or job.get("status") not in ACTIVE_STATUSES:
                 continue
-            job.update(status="error", error=reason, finished=_now())
+            job.update(status="stopped", error=reason, finished=_now())
             save(job, _locked=True)
     return len(stuck)
 
@@ -218,8 +233,10 @@ _ERROR_KEEP_S = 3600  # failed jobs stay addressable briefly (the open view poll
 
 
 def prune() -> None:
-    """Drop the oldest job files past JOBS_KEEP, and failed jobs after an hour.
-    Called after each job completes."""
+    """Drop the oldest job files past JOBS_KEEP, and failed jobs after an hour. Stopped
+    jobs are NOT swept — their PDF is the only thing that makes a re-run possible, and a
+    user who stopped a document may come back to it tomorrow. Called after each job
+    completes."""
     import time
     now = time.time()
     for job in _iter_summaries():
