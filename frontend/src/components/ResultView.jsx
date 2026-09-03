@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react'
 import {
   Briefcase, Building2, CalendarClock, Check, Columns, Download, FileJson2, Loader2,
-  Pencil, Plus, Trash2, UserCog, Users, X,
+  Gauge, Pencil, Plus, Trash2, UserCog, Users, X,
 } from 'lucide-react'
 import clsx from 'clsx'
 import { userHeaders } from '../lib/api'
@@ -38,6 +38,62 @@ const PERSON_DETAIL_FIELDS = [
   ['jumlah_lembar_saham', 'Jumlah Saham'],
   ['persentase_saham', '% Saham'],
 ]
+
+// The OCR API reports how long each of its own stages took (latency_data). Surfacing it
+// answers the question a slow extraction actually raises — WHERE did the time go — which
+// a single wall-clock figure cannot. The stages are the API's, named as it names them.
+const STAGES = [
+  ['pdf_to_images_time', 'PDF → images'],
+  ['images_to_md_time', 'Images → markdown'],
+  ['parallel_prompt_time', 'Extraction prompts'],
+]
+
+function StageTimings({ latency, wallClock }) {
+  const stages = STAGES
+    .map(([key, label]) => [label, Number(latency?.[key] || 0)])
+    .filter(([, seconds]) => seconds > 0)
+  if (!stages.length) return null
+
+  const apiTotal = Number(latency?.total_time || 0)
+  // Bars are drawn against the largest stage, not the total: stages can overlap (the
+  // prompts run in parallel), so treating them as slices of one bar would be a lie.
+  const longest = Math.max(...stages.map(([, seconds]) => seconds))
+  // What the API did not account for: our queue wait, the upload, base64, the network.
+  const overhead = wallClock && apiTotal ? Math.max(0, wallClock - apiTotal) : 0
+
+  return (
+    <div className="mt-3 rounded-xl border border-line bg-canvas/60 px-3 py-2.5">
+      <div className="mb-2 flex items-center gap-1.5">
+        <Gauge size={13} className="text-brand" />
+        <span className="label">Waktu proses</span>
+        {apiTotal > 0 && (
+          <span className="ml-auto text-[11px] font-semibold text-ink-soft">
+            {apiTotal.toFixed(1)}s di OCR API
+          </span>
+        )}
+      </div>
+      <div className="space-y-1.5">
+        {stages.map(([label, seconds]) => (
+          <div key={label} className="flex items-center gap-2.5">
+            <span className="w-[132px] shrink-0 text-[11.5px] text-ink-soft">{label}</span>
+            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
+              <span className="block h-full rounded-full bg-brand"
+                    style={{ width: `${Math.max(2, (seconds / longest) * 100)}%` }} />
+            </span>
+            <span className="w-[52px] shrink-0 text-right text-[11.5px] font-semibold tabular-nums text-ink">
+              {seconds.toFixed(1)}s
+            </span>
+          </div>
+        ))}
+      </div>
+      {overhead > 0.05 && (
+        <p className="mt-2 text-[10.5px] text-ink-faint">
+          +{overhead.toFixed(1)}s di luar API — antrean, unggah, dan jaringan.
+        </p>
+      )}
+    </div>
+  )
+}
 
 const EMPTY_PERSON = {
   nama: '', jabatan: '', no_ktp_passport: '', tempat_lahir: '',
@@ -388,6 +444,7 @@ export default function ResultView({ job, username, onJobUpdated }) {
           <p className="mt-0.5 text-[12px] text-ink-faint">
             {job.filename} · {job.pages} halaman · {job.duration_s}s
           </p>
+          <StageTimings latency={job.latency_data} wallClock={job.duration_s} />
         </div>
         <div className="flex shrink-0 gap-2">
           {editing ? (

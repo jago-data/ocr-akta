@@ -349,9 +349,18 @@ async def _mock_extract(pdf_bytes: bytes, label: str,
     await report("extract", 0, 1)
     await asyncio.sleep(1.0)
     await report("extract", 1, 1)
-    # Shaped like the real latency_data so anything reading it works in mock mode too.
-    latency = {"file_name": label, "pdf_to_images_time": 0.0, "images_to_md_time": 0.0,
-               "parallel_prompt_time": 0.0, "total_time": round(0.4 * (n_pages + 1) + 1.0, 2)}
+    # Shaped like the real latency_data, and with the stages actually populated: zeros
+    # would make the UI's timing breakdown render empty, so mock mode would not exercise
+    # the thing it exists to exercise. Split roughly the way real runs do — rendering is
+    # per-page and cheap, the prompts dominate.
+    ocr_s = round(0.4 * (n_pages + 1), 2)
+    latency = {
+        "file_name": label,
+        "pdf_to_images_time": round(ocr_s * 0.25, 2),
+        "images_to_md_time": round(ocr_s * 0.75, 2),
+        "parallel_prompt_time": 1.0,
+        "total_time": round(ocr_s + 1.0, 2),
+    }
     return _mock_record(label), n_pages, latency
 
 
