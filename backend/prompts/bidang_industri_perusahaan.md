@@ -17,45 +17,52 @@ Source: **Pasal 3** — *Maksud dan Tujuan serta Kegiatan Usaha*.
 
 ## The rule
 
-Pasal 3 normally has two ayat:
+Pasal 3 normally has two ayat: ayat (1) the general purpose, ayat (2) the detailed
+activities. **Do not rely on finding those numbers.** The conversion to Markdown often
+buries them in the deed's dot leaders (`---- ---- 1. Maksud dan tujuan ----`), and some
+deeds do not label them at all. Decide from what the lines *contain* instead.
 
-- **ayat (1)** — the general purpose. Broad sectors, no codes: `PERDAGANGAN`, `JASA`,
-  `PEMBANGUNAN`.
-- **ayat (2)** — the detailed activities. This is where KBLI codes appear.
+### Codes decide, and the longest code wins
 
-Which ayat to take is decided by whether **any** KBLI code is present in Pasal 3:
+Scan the whole of Pasal 3 for KBLI codes — numeric, `KBLI` may or may not appear beside
+them, and they come in two depths:
 
-1. **At least one point carries a KBLI code → take the CODED points from ayat (2), and
-   nothing else.**
-   Codes take priority over prose. Output one array element per coded point. Do not
-   summarise, do not merge two points into one string, do not drop a point because it
-   looks similar to another.
+| depth | example in the deed | what it is |
+|---|---|---|
+| 2 digits | `Konstruksi Bangunan Sipil (Kode KBLI 42)` | the category heading |
+| 5 digits | `42206 - KONSTRUKSI SENTRAL TELEKOMUNIKASI` | the actual activity |
 
-   Canonical form is `KODE-DESKRIPSI` — the code, a single hyphen, no spaces around it,
-   description in UPPERCASE. Normalise whatever layout the deed uses:
+A deed frequently carries **both**, because ayat (1) lists the categories and ayat (2)
+lists the activities inside them. The 2-digit codes are then simply the first two digits of
+the 5-digit ones — `42 → 42206`, `46 → 46523`. They are the same information, coarser.
 
-   | in the deed | output |
-   |---|---|
-   | `70209 - AKTIVITAS KONSULTASI MANAJEMEN LAINNYA` | `70209-AKTIVITAS KONSULTASI MANAJEMEN LAINNYA` |
-   | `PERDAGANGAN BESAR (78828)` | `78828-PERDAGANGAN BESAR` |
-   | `PENYEWAAN ALAT KONSTRUKSI DENGAN OPERATOR (KBLI 43905)` | `43905-PENYEWAAN ALAT KONSTRUKSI DENGAN OPERATOR` |
+1. **5-digit codes present → return only those.** One array element per code, in the form
+   `KODE-DESKRIPSI`. Drop every 2-digit category code, and drop any uncoded line: with
+   activities in hand, a category or a bare sector name beside them is a heading, not an
+   extra activity.
 
-   Drop the literal token `KBLI`. A code is numeric, usually 5 digits.
+2. **Only 2-digit codes present → return those**, same `KODE-DESKRIPSI` form. This is a
+   deed that stopped at the category level; the categories are the most specific answer it
+   contains.
 
-   Points **without** a code are dropped in this case. Once codes are present they are
-   the specific, classifiable answer, and an uncoded line beside them is almost always
-   the general heading the coded points sit under — keeping it puts `PERDAGANGAN` next to
-   `46523-PERDAGANGAN BESAR PERALATAN TELEKOMUNIKASI`, which is a duplicate at a coarser
-   grain rather than an extra activity. Every coded deed in the gold set bears this out:
-   all of their points are coded, none are mixed.
+3. **No codes anywhere → return the general sectors**, as plain uppercase strings, one per
+   element — `["PERDAGANGAN", "JASA"]`. These come from ayat (1); where a longer,
+   uncoded elaboration also appears, prefer the short sector terms and drop anything that
+   merely restates one of them at greater length.
 
-2. **No point anywhere in Pasal 3 carries a KBLI code → take ayat (1), and only ayat (1).**
-   Plain uppercase strings, one array element per point, e.g.
-   `["PERDAGANGAN", "JASA"]`. Skip ayat (2) entirely in this case — without codes it
-   restates ayat (1) at greater length and produces duplicates.
+4. **Pasal 3 not locatable → `[]`.** Never `[""]`, never a guess from the company name.
 
-3. **Pasal 3 cannot be located, or has no business purpose → `[]`.**
-   An empty array, never `[""]` and never a guess from the company name.
+### Canonical form
+
+`KODE-DESKRIPSI` — the code, a single hyphen, no spaces around it, description in
+UPPERCASE, the literal token `KBLI` removed:
+
+| in the deed | output |
+|---|---|
+| `70209 - AKTIVITAS KONSULTASI MANAJEMEN LAINNYA` | `70209-AKTIVITAS KONSULTASI MANAJEMEN LAINNYA` |
+| `PERDAGANGAN BESAR (78828)` | `78828-PERDAGANGAN BESAR` |
+| `PENYEWAAN ALAT KONSTRUKSI DENGAN OPERATOR (KBLI 43905)` | `43905-PENYEWAAN ALAT KONSTRUKSI DENGAN OPERATOR` |
+| `Konstruksi Khusus (Kode KBLI 43)` | `43-KONSTRUKSI KHUSUS` |
 
 ## Point per point
 
@@ -96,6 +103,10 @@ Two failures to watch for, both seen in practice:
   BESAR DAN ECERAN", ...]` — ayat (2) paraphrasing ayat (1), producing near-duplicates.
 - **A coded deed with uncoded lines mixed in.** Symptom: a broad sector with no code
   sitting among `KODE-DESKRIPSI` entries. Codes win; the uncoded line is the heading.
+- **Category codes returned instead of activity codes.** The one seen on `moratelindo`:
+  8 two-digit categories from ayat (1) instead of the 14 five-digit activities from ayat
+  (2). Both are real KBLI codes and both look correct in isolation — the giveaway is that
+  every code is 2 digits, and that each is the prefix of a 5-digit code further down.
 
 ## Prompt text
 
@@ -104,16 +115,22 @@ Ready to paste into the API's extraction prompt as the section for this field.
 ```text
 bidang_industri_perusahaan — from Pasal 3 (Maksud dan Tujuan serta Kegiatan Usaha).
 
-Decide which ayat to use by scanning ALL of Pasal 3 for KBLI codes (numeric, usually 5
-digits; the word "KBLI" may or may not appear):
+Do not rely on locating "ayat (1)" or "ayat (2)" — the numbering is often lost in
+conversion. Decide from the content.
 
-- If AT LEAST ONE point carries a KBLI code, KBLI TAKES PRIORITY: return only the coded
-  points from ayat (2), one array element each, in the exact form "KODE-DESKRIPSI" —
-  code, one hyphen, no spaces, description in UPPERCASE, the token "KBLI" removed. Points
-  with no code are dropped; do not fall back to ayat (1) for them, and do not add a
-  general sector alongside the coded ones.
-- If NO point in Pasal 3 carries a KBLI code, extract from ayat (1) only, as plain
-  uppercase strings, one array element per point. Ignore ayat (2).
+Scan ALL of Pasal 3 for KBLI codes. They appear at two depths: 2-digit CATEGORY codes
+(e.g. "Konstruksi Khusus (Kode KBLI 43)") and 5-digit ACTIVITY codes (e.g. "43212 -
+INSTALASI KOMUNIKASI"). A deed often lists both, and the 2-digit codes are just the first
+two digits of the 5-digit ones.
+
+- If any 5-DIGIT codes are present, return ONLY those, one array element each, in the exact
+  form "KODE-DESKRIPSI": code, one hyphen, no spaces, description in UPPERCASE, the token
+  "KBLI" removed. Drop every 2-digit category code and every line with no code — beside
+  the activities they are headings, not extra activities.
+- If only 2-DIGIT codes are present, return those, in the same form.
+- If NO codes appear anywhere, return the general business sectors as plain uppercase
+  strings, one element per sector, preferring the short sector terms over any longer line
+  that restates one of them.
 - If Pasal 3 or the business purpose cannot be found, return [].
 
 One point in the deed is exactly one element. Do not merge points, do not split a point on
