@@ -135,6 +135,32 @@ _SESSION_SECRET = config.SESSION_SECRET
 # independent of the per-user cap (which a caller can multiply by varying username).
 _admission = asyncio.Semaphore(config.MAX_CONCURRENT_UPLOADS)
 
+# Per-user run slots. A user may have MAX_ACTIVE_PER_USER documents in flight but only
+# CONCURRENT_PER_USER of them extracting at any moment; the others hold "queued" until a
+# slot frees. One semaphore per user, created on first use and dropped when that user has
+# nothing left running, so the dict cannot grow without bound.
+_user_slots: dict = {}
+_user_slots_lock = asyncio.Lock()
+
+
+async def _acquire_slot(user: str):
+    async with _user_slots_lock:
+        slot = _user_slots.get(user)
+        if slot is None:
+            slot = asyncio.Semaphore(config.CONCURRENT_PER_USER)
+            _user_slots[user] = slot
+    await slot.acquire()
+    return slot
+
+
+async def _release_slot(user: str, slot) -> None:
+    slot.release()
+    async with _user_slots_lock:
+        # Fully idle again: forget this user rather than keeping a semaphore per person
+        # who has ever uploaded. `_value` is the count of free permits.
+        if _user_slots.get(user) is slot and slot._value >= config.CONCURRENT_PER_USER:
+            _user_slots.pop(user, None)
+
 # asyncio.Task objects must stay strongly referenced or GC can drop them mid-run
 _background_tasks: set = set()
 
@@ -301,7 +327,15 @@ async def auth_login(req: LoginRequest, request: Request):
 # ---------------------------------------------------------------------------
 # Extraction jobs
 # ---------------------------------------------------------------------------
-async def _run_job(job: dict, pdf_bytes: bytes) -> None:
+async def _run_job(job: dict) -> None:
+    """Wait for one of this user's run slots, then extract. The job sits at "queued" for
+    the whole wait, which is what the UI already shows as "Waiting in the queue…".
+
+    The PDF is re-read from disk here rather than carried in from the upload: a queued job
+    would otherwise pin its bytes in memory for as long as it waits, and ten 30 MB akta
+    per user is 300 MB of nothing happening."""
+    user = job.get("username") or ""
+    slot = await _acquire_slot(user)
     t0 = time.time()
 
     async def progress(stage: str, done: int, total: int) -> None:
@@ -311,6 +345,9 @@ async def _run_job(job: dict, pdf_bytes: bytes) -> None:
         await run_in_threadpool(jobs.save, job)
 
     try:
+        pdf_bytes = await run_in_threadpool(jobs.read_pdf, job["id"])
+        if pdf_bytes is None:
+            raise ocr_client.OcrError("the uploaded PDF is no longer on disk")
         record, n_pages, latency = await ocr_client.extract_akta(
             pdf_bytes, label=job["filename"], progress=progress)
         company = record.get("nama_perusahaan", "")
@@ -339,6 +376,7 @@ async def _run_job(job: dict, pdf_bytes: bytes) -> None:
         status=job["status"], model=job["model"], company=company, error=error)
     await run_in_threadpool(jobs.save, job)
     await run_in_threadpool(jobs.prune)
+    await _release_slot(user, slot)
 
 
 @app.post("/extract")
@@ -374,14 +412,21 @@ async def extract(request: Request, username: str = ""):
         _admission.release()
 
 
+# count_active() and create() are two steps, and a batch arriving together can run all of
+# its checks before any of its creates — so every request sees room and the cap is passed.
+# Serialising just those two steps costs nothing (they are microseconds) and makes the
+# limit mean what it says.
+_accept_lock = asyncio.Lock()
+
+
 async def _accept_upload(file, name: str, user: str):
     active = await run_in_threadpool(jobs.count_active, user)
     if active >= config.MAX_ACTIVE_PER_USER:
         raise HTTPException(
             status_code=429,
-            detail=f"You already have {active} document(s) processing — the limit is "
-                   f"{config.MAX_ACTIVE_PER_USER} at a time. Wait for them to finish, "
-                   "then upload again.")
+            detail=f"You already have {active} document(s) queued or processing — the "
+                   f"limit is {config.MAX_ACTIVE_PER_USER}. Wait for some to finish, then "
+                   "upload again.")
     pdf_bytes = await file.read(config.MAX_UPLOAD_BYTES + 1)
     if len(pdf_bytes) > config.MAX_UPLOAD_BYTES:
         raise HTTPException(status_code=413,
@@ -389,9 +434,19 @@ async def _accept_upload(file, name: str, user: str):
     if not pdf_bytes.startswith(b"%PDF"):
         raise HTTPException(status_code=400, detail="not a valid PDF file")
     model = "mock" if config.AKTA_OCR_MODE == "mock" else "internal-ocr-api"
-    job = await run_in_threadpool(jobs.create, user, name, model)
+    async with _accept_lock:
+        # Re-checked under the lock: the count above was taken before the PDF was read,
+        # and a concurrent batch may have filled the remaining room in the meantime.
+        active = await run_in_threadpool(jobs.count_active, user)
+        if active >= config.MAX_ACTIVE_PER_USER:
+            raise HTTPException(
+                status_code=429,
+                detail=f"You already have {active} document(s) queued or processing — the "
+                       f"limit is {config.MAX_ACTIVE_PER_USER}. Wait for some to finish, "
+                       "then upload again.")
+        job = await run_in_threadpool(jobs.create, user, name, model)
     await run_in_threadpool(jobs.save_pdf, job["id"], pdf_bytes)
-    task = asyncio.get_running_loop().create_task(_run_job(job, pdf_bytes))
+    task = asyncio.get_running_loop().create_task(_run_job(job))
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
     return {"job_id": job["id"], "status": job["status"]}
@@ -489,13 +544,18 @@ def admin_analytics_stamp():
 def app_info():
     return {"name": config.APP_NAME, "tagline": config.APP_TAGLINE,
             "model": config.AKTA_OCR_MODE, "helpdesk": config.HELPDESK_EMAIL,
-            "max_active": config.MAX_ACTIVE_PER_USER}
+            "max_active": config.MAX_ACTIVE_PER_USER,
+            "concurrent_per_user": config.CONCURRENT_PER_USER}
 
 
 @app.on_event("startup")
 async def _startup() -> None:
     """Resolve jobs abandoned by a previous process: without this they poll as
     'queued'/'ocr' forever and never reach a terminal state."""
+    # Run slots are asyncio primitives, so they belong to the loop that created them.
+    # One loop per process in production makes this a no-op; under tests, where each
+    # client spins a fresh loop, it stops a semaphore from a dead loop being awaited.
+    _user_slots.clear()
     n = await run_in_threadpool(jobs.fail_interrupted, "interrupted by a server restart")
     if n:
         print(f"  marked {n} interrupted job(s) as failed", flush=True)

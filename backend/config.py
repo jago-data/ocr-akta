@@ -70,9 +70,13 @@ PORT = _int("PORT", 0) or _int("BE_PORT", 8300)
 SHARED_HISTORY = os.environ.get("AKTA_SHARED_HISTORY", "").strip() == "1"
 
 # --- Uploads / jobs ---
-# A user may have at most this many documents processing at once; a batch that
-# would exceed it is refused whole with a warning (client pre-checks too).
-MAX_ACTIVE_PER_USER = _positive_int("AKTA_MAX_ACTIVE_PER_USER", 5)
+# How many documents a user may have IN FLIGHT — queued plus running. A batch that would
+# exceed it is refused whole, with a warning (the client pre-checks too).
+MAX_ACTIVE_PER_USER = _positive_int("AKTA_MAX_ACTIVE_PER_USER", 10)
+# How many of those actually run at once. The rest wait their turn rather than being
+# refused: an operator uploading ten akta wants all ten accepted, not two accepted and
+# eight bounced. Keeping this small also keeps one user from occupying the whole OCR API.
+CONCURRENT_PER_USER = _positive_int("AKTA_CONCURRENT_PER_USER", 2)
 # Process-wide admission cap: every accepted job holds its PDF in memory until the
 # OCR API answers, so this — not the per-user cap — is the real memory bound.
 MAX_CONCURRENT_UPLOADS = _positive_int("AKTA_MAX_CONCURRENT_UPLOADS", 40)

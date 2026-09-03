@@ -74,24 +74,29 @@ export default function Workspace({ onLogout }) {
     if (pdfs.length === 0) { setError('Only PDF files are accepted.'); return }
     // per-user processing cap: refuse the whole batch up front rather than
     // letting half of it queue and half of it bounce off the server limit
-    const maxActive = brand.max_active || 5
+    const maxActive = brand.max_active || 10
     const active = jobList.filter((j) => ACTIVE.has(j.status)).length
     if (active + pdfs.length > maxActive) {
-      setError(`You can process at most ${maxActive} documents at a time` +
-        (active ? ` and ${active} are still running` : '') +
+      setError(`You can have at most ${maxActive} documents queued at once` +
+        (active ? ` and ${active} are still in the queue` : '') +
         `. You selected ${pdfs.length} — nothing was uploaded.`)
       return
     }
     setUploading(true)
     const accepted = []
-    for (const f of pdfs) {
+    // Sent a few at a time rather than one after another: with ten files, strictly
+    // sequential POSTs make the last one wait for nine full uploads before it is even
+    // queued. Kept small on purpose — the server checks the per-user cap and creates the
+    // job in two steps, so firing all ten at once could slip past the limit.
+    const UPLOAD_LANES = 3
+    async function send(f) {
       const fd = new FormData()
       fd.append('file', f)
       try {
         const r = await fetch(`/api/extract?username=${encodeURIComponent(user)}`, {
           method: 'POST', headers: userHeaders(), body: fd,
         })
-        if (r.status === 401) { onLogout(); return }
+        if (r.status === 401) return 'unauthorized'
         const d = await r.json().catch(() => ({}))
         if (r.ok) {
           if (d.job_id) accepted.push(d.job_id)
@@ -101,7 +106,16 @@ export default function Workspace({ onLogout }) {
       } catch {
         setError(`${f.name}: upload failed. Could not reach the server.`)
       }
+      return ''
     }
+    const queue = [...pdfs]
+    const lanes = Array.from({ length: Math.min(UPLOAD_LANES, queue.length) }, async () => {
+      while (queue.length) {
+        if (await send(queue.shift()) === 'unauthorized') { queue.length = 0; return 'unauthorized' }
+      }
+      return ''
+    })
+    if ((await Promise.all(lanes)).includes('unauthorized')) { setUploading(false); onLogout(); return }
     setUploading(false)
     refresh()
     // a single upload has one obvious next screen — open it so the user watches
@@ -418,7 +432,8 @@ function DashboardView({ jobs, onOpen, onGoTo }) {
 /* ---------------------------------------------------------------- Upload */
 function UploadView({ jobs, onUpload, uploading, error, onOpen }) {
   const brand = useBrand()
-  const maxActive = brand.max_active || 5
+  const maxActive = brand.max_active || 10
+  const atOnce = brand.concurrent_per_user || 2
   const [dragOver, setDragOver] = useState(false)
   const fileRef = useRef(null)
   const recent = jobs.slice(0, 30)
@@ -446,7 +461,9 @@ function UploadView({ jobs, onUpload, uploading, error, onOpen }) {
         <p className="text-[13.5px] font-medium text-ink">
           {uploading ? 'Uploading…' : 'Drag PDFs here, or click to browse'}
         </p>
-        <p className="mt-1 text-[12px] text-ink-faint">Up to {maxActive} PDFs at a time</p>
+        <p className="mt-1 text-[12px] text-ink-faint">
+          Up to {maxActive} PDFs at once — {atOnce} are processed at a time, the rest queue
+        </p>
         <input ref={fileRef} type="file" accept=".pdf" multiple hidden
                onChange={(e) => { onUpload(e.target.files); e.target.value = '' }} />
       </div>

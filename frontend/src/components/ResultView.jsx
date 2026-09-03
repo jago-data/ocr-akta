@@ -43,54 +43,58 @@ const PERSON_DETAIL_FIELDS = [
 // answers the question a slow extraction actually raises — WHERE did the time go — which
 // a single wall-clock figure cannot. The stages are the API's, named as it names them.
 const STAGES = [
-  ['pdf_to_images_time', 'PDF → images'],
-  ['images_to_md_time', 'Images → markdown'],
-  ['parallel_prompt_time', 'Extraction prompts'],
+  ['pdf_to_images_time', 'PDF → images', 'bg-brand', 'text-brand'],
+  ['images_to_md_time', 'Images → markdown', 'bg-navy', 'text-navy'],
+  ['parallel_prompt_time', 'Extraction prompts', 'bg-amber', 'text-amber'],
 ]
 
 function StageTimings({ latency, wallClock }) {
   const stages = STAGES
-    .map(([key, label]) => [label, Number(latency?.[key] || 0)])
-    .filter(([, seconds]) => seconds > 0)
+    .map(([key, label, bar, text]) => ({ label, bar, text, seconds: Number(latency?.[key] || 0) }))
+    .filter((stage) => stage.seconds > 0)
   if (!stages.length) return null
 
   const apiTotal = Number(latency?.total_time || 0)
-  // Bars are drawn against the largest stage, not the total: stages can overlap (the
-  // prompts run in parallel), so treating them as slices of one bar would be a lie.
-  const longest = Math.max(...stages.map(([, seconds]) => seconds))
-  // What the API did not account for: our queue wait, the upload, base64, the network.
+  const measured = stages.reduce((sum, stage) => sum + stage.seconds, 0)
+  // Segments are drawn as shares of the API's OWN total, not of their sum. When the stages
+  // account for all of it the bar fills; when they do not, the gap is left visible rather
+  // than scaled away — unattributed time inside the API is worth seeing, not hiding.
+  const scale = apiTotal > 0 ? apiTotal : measured
   const overhead = wallClock && apiTotal ? Math.max(0, wallClock - apiTotal) : 0
 
   return (
-    <div className="mt-3 rounded-xl border border-line bg-canvas/60 px-3 py-2.5">
-      <div className="mb-2 flex items-center gap-1.5">
-        <Gauge size={13} className="text-brand" />
-        <span className="label">Waktu proses</span>
-        {apiTotal > 0 && (
-          <span className="ml-auto text-[11px] font-semibold text-ink-soft">
-            {apiTotal.toFixed(1)}s di OCR API
-          </span>
-        )}
+    <div className="mt-2.5 rounded-xl border border-line bg-canvas/60 px-3 py-2.5">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-0.5">
+        <span className="label flex items-center gap-1.5">
+          <Gauge size={12} className="text-brand" /> Waktu proses
+        </span>
+        <span className="ml-auto text-[11.5px] text-ink-soft">
+          <b className="font-semibold text-ink tabular-nums">{apiTotal.toFixed(1)}s</b> di OCR API
+          {overhead > 0.05 && (
+            <> · <span className="tabular-nums">+{overhead.toFixed(1)}s</span> antrean, unggah &amp; jaringan</>
+          )}
+        </span>
       </div>
-      <div className="space-y-1.5">
-        {stages.map(([label, seconds]) => (
-          <div key={label} className="flex items-center gap-2.5">
-            <span className="w-[132px] shrink-0 text-[11.5px] text-ink-soft">{label}</span>
-            <span className="h-1.5 flex-1 overflow-hidden rounded-full bg-line">
-              <span className="block h-full rounded-full bg-brand"
-                    style={{ width: `${Math.max(2, (seconds / longest) * 100)}%` }} />
-            </span>
-            <span className="w-[52px] shrink-0 text-right text-[11.5px] font-semibold tabular-nums text-ink">
-              {seconds.toFixed(1)}s
-            </span>
-          </div>
+
+      {/* One bar across the full width — three narrow bars in a column left most of the
+          header empty and made the stages look unrelated to each other. */}
+      <div className="mt-2 flex h-2 w-full overflow-hidden rounded-full bg-line-soft">
+        {stages.map((stage) => (
+          <span key={stage.label} className={stage.bar}
+                style={{ width: `${(stage.seconds / scale) * 100}%` }}
+                title={`${stage.label} — ${stage.seconds.toFixed(1)}s`} />
         ))}
       </div>
-      {overhead > 0.05 && (
-        <p className="mt-2 text-[10.5px] text-ink-faint">
-          +{overhead.toFixed(1)}s di luar API — antrean, unggah, dan jaringan.
-        </p>
-      )}
+
+      <div className="mt-2 flex flex-wrap items-center gap-x-5 gap-y-1">
+        {stages.map((stage) => (
+          <span key={stage.label} className="flex items-center gap-1.5 text-[11.5px]">
+            <span className={`h-2 w-2 shrink-0 rounded-full ${stage.bar}`} />
+            <span className="text-ink-soft">{stage.label}</span>
+            <b className={`font-semibold tabular-nums ${stage.text}`}>{stage.seconds.toFixed(1)}s</b>
+          </span>
+        ))}
+      </div>
     </div>
   )
 }

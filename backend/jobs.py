@@ -109,6 +109,17 @@ def save_pdf(job_id: str, pdf_bytes: bytes) -> None:
         pass
 
 
+def read_pdf(job_id: str) -> bytes | None:
+    """The stored upload, or None if it is gone (pruned, or swept after a failure). Read
+    at extraction time rather than held from upload, so a job waiting for a run slot costs
+    a file on disk instead of its bytes in memory."""
+    try:
+        with open(pdf_path(job_id), "rb") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
 def pdf_path(job_id: str) -> str:
     safe = "".join(c for c in job_id if c.isalnum() or c in "-_")
     return os.path.join(UPLOADS_DIR, f"{safe}.pdf")
