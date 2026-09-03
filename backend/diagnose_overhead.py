@@ -30,7 +30,7 @@ def _parse(stamp: str):
 
 
 def load_finished() -> list:
-    """Every completed job that recorded both a wall clock and an API total."""
+    """Every completed job that recorded both an elapsed time and an API total."""
     out = []
     try:
         names = os.listdir(jobs_mod.JOBS_DIR)
@@ -85,10 +85,12 @@ def main() -> None:
 
     worst = sorted(finished, key=lambda j: j["overhead"], reverse=True)[:10]
     print("Slowest by time outside the API:")
-    print(f"  {'document':<32}{'pages':>6}{'wall':>8}{'API':>8}{'outside':>9}{'overlap':>9}")
+    print("  elapsed = real time start to finish; in API = what the API reports for itself;")
+    print("  outside = the difference; overlap = other extractions running at the same time")
+    print(f"  {'document':<32}{'pages':>6}{'elapsed':>9}{'in API':>9}{'outside':>9}{'overlap':>9}")
     for job in worst:
-        print(f"  {job['file'][:31]:<32}{job['pages']:>6}{job['duration']:>7.1f}s"
-              f"{job['api']:>7.1f}s{job['overhead']:>8.1f}s{job['overlap']:>9}")
+        print(f"  {job['file'][:31]:<32}{job['pages']:>6}{job['duration']:>8.1f}s"
+              f"{job['api']:>8.1f}s{job['overhead']:>8.1f}s{job['overlap']:>9}")
         if job["phases"]:
             detail = "  ".join(f"{k}={v}" for k, v in job["phases"].items() if v)
             print(f"      phases: {detail}")
