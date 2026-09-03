@@ -1,11 +1,11 @@
 # Extraction rule — `bidang_industri_perusahaan`
 
-**This app does not run prompts.** Extraction is delegated to the internal OCR API
-(`backend/ocr_client.py` posts the PDF and stores what comes back), so nothing here is
-executed by this backend. This file is the *specification* for whoever operates that API:
-the rule the model must follow for this one field, with the reasoning and the test cases.
-Keep it in step with the API's own prompt — when the two disagree, this file is what the
-reviewers in the Akta app were told to expect.
+**This app does not run prompts.** Extraction is delegated to the internal OCR API, which
+receives the PDF and returns the record, so nothing here is executed locally. This file is
+the *specification* for whoever operates that API: the rule the model must follow for this
+one field, with the reasoning and the test cases. Keep it in step with the API's own prompt
+— when the two disagree, this file is what the reviewers in the Akta app were told to
+expect.
 
 Source: **Pasal 3** — *Maksud dan Tujuan serta Kegiatan Usaha*.
 
