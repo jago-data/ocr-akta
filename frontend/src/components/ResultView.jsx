@@ -59,6 +59,7 @@ const CLIENT_PHASES = [
   ['page_count_s', 'count pages', 'opening the PDF to count its pages'],
   ['encode_s', 'base64 encode', 'preparing the PDF as base64 inside the JSON body'],
   ['retry_wait_s', 'retry backoff', 'pausing before another attempt after the API returned 5xx'],
+  ['failed_http_s', 'failed attempts', 'time spent on calls the API did not answer, before the one that did'],
 ]
 
 function OutsideApi({ phases, apiTotal }) {
@@ -77,10 +78,16 @@ function OutsideApi({ phases, apiTotal }) {
     })
   }
   if (!rows.length) return null
+  const attempts = Number(phases.attempts || 0)
 
   return (
     <div className="mt-2.5 border-t border-line pt-2">
-      <p className="text-[10.5px] text-ink-faint">Outside the time the API reports</p>
+      <p className="text-[10.5px] text-ink-faint">
+        Outside the time the API reports
+        {attempts > 1 && (
+          <span className="text-alert"> · answered on attempt {attempts} of {attempts}</span>
+        )}
+      </p>
       <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
         {rows.map((row) => (
           <span key={row.label} className="text-[11.5px] text-ink-soft" title={row.why}>

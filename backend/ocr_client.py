@@ -239,7 +239,12 @@ async def _api_extract(pdf_bytes: bytes, label: str,
     # unattributable number, and in production it reached two minutes — which of these
     # four it was is not something anyone should have to guess at.
     phases = {"page_count_s": 0.0, "encode_s": 0.0, "api_wait_s": 0.0,
-              "http_s": 0.0, "retry_wait_s": 0.0}
+              # http_s is the attempt that ANSWERED. Time burned on attempts that failed
+              # is separate: summing them into one figure and subtracting the API's
+              # total_time reported 1228s of "transit" in production, when the truth was
+              # three attempts of several minutes each.
+              "http_s": 0.0, "failed_http_s": 0.0, "attempts": 0,
+              "retry_wait_s": 0.0}
 
     mark = time.perf_counter()
     n_pages = await asyncio.to_thread(_page_count, pdf_bytes)
@@ -266,19 +271,26 @@ async def _api_extract(pdf_bytes: bytes, label: str,
             # let one bad spell drain every slot and stall everyone. Acquire is timed on
             # its own: a queue behind AKTA_OCR_CONCURRENCY looks exactly like a slow API
             # from the outside, and the two want opposite fixes.
+            phases["attempts"] += 1
             mark = time.perf_counter()
             await sem.acquire()
             phases["api_wait_s"] += round(time.perf_counter() - mark, 2)
+            attempt_s = 0.0
             try:
                 mark = time.perf_counter()
                 resp = await client.post(config.OCR_API_URL, headers=headers, json=body)
-                phases["http_s"] += round(time.perf_counter() - mark, 2)
+                attempt_s = round(time.perf_counter() - mark, 2)
             finally:
                 sem.release()
             if resp.status_code < 500:
+                phases["http_s"] = attempt_s   # the call that answered
                 break  # 2xx/4xx are final answers; only 5xx is worth retrying
+            phases["failed_http_s"] += attempt_s
             last = OcrError(f"OCR API returned HTTP {resp.status_code}")
         except httpx.HTTPError as e:
+            # A call that timed out or dropped still consumed time; attribute it as failed
+            # rather than losing it, or the phases stop adding up to the wall clock.
+            phases["failed_http_s"] += round(time.perf_counter() - mark, 2)
             last = e
         if attempt < config.OCR_API_RETRIES - 1:
             mark = time.perf_counter()

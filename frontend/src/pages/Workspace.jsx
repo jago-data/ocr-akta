@@ -119,9 +119,10 @@ export default function Workspace({ onLogout }) {
     if ((await Promise.all(lanes)).includes('unauthorized')) { setUploading(false); onLogout(); return }
     setUploading(false)
     refresh()
-    // a single upload has one obvious next screen — open it so the user watches
-    // the akta being read instead of hunting for it in the list
-    if (pdfs.length === 1 && accepted.length === 1) openJob(accepted[0])
+    // Deliberately does NOT open the document. A single upload used to jump straight to
+    // it, which took the screen away from someone whose next action was another upload —
+    // and with a queue, one file is no longer a special case worth a different flow.
+    // The list shows it with its progress; opening it is a click when they want it.
   }
 
   async function signOut() {
