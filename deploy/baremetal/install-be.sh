@@ -1,46 +1,101 @@
 #!/usr/bin/env bash
-# Idempotent backend install — creates/updates the conda env, installs pip deps,
-# seeds config files. Does NOT start anything (run-be.sh does).
+# install-be.sh — provision/update the BACKEND. Idempotent. Does NOT start the API.
+#
+#   • create/update the conda env (Python runtime)
+#   • pip install backend/requirements.txt
+#   • ensure the root .env exists (seed from .env.example; never clobber)
+#   • seed the two gitignored, site-specific files: auth_service.py and data/admin.txt
+#   • sanity-check the required settings
+#
+# There is NO database step and NO migrations: jobs are JSON files under backend/data,
+# the original PDFs sit beside them, and extraction is delegated to the internal OCR API.
 set -euo pipefail
 source "$(dirname "${BASH_SOURCE[0]}")/conventions.sh"
 
-# Air-gapped hosts resolve packages through the internal mirror. Without that
-# config these commands hang on a network timeout instead of saying why.
-if [ ! -f "$HOME/.condarc" ] && [ -z "${CONDA_CHANNELS:-}" ]; then
-  echo "ERROR: no ~/.condarc found. On an air-gapped host, point conda at the" >&2
-  echo "       internal mirror first (channels + default_channels)." >&2
-  exit 1
+# Air-gapped hosts resolve packages through the internal mirror. These are WARNINGS, not
+# refusals: an operator may be injecting config another way, and a check that guesses at
+# file paths gets it wrong. Ask the tool — `conda config --show-sources` lists every file
+# conda really reads (/etc/conda/condarc, $CONDA_PREFIX/.condarc, ~/.condarc, $CONDARC),
+# which is the actual question. The old check tested ~/.condarc alone and refused hosts
+# that were configured correctly somewhere else.
+if ! "$CONDA_EXE" config --show-sources 2>/dev/null | grep -q '^==>' \
+   && [ -z "${CONDA_CHANNELS:-}" ]; then
+  echo "    ⚠ conda reports no configuration at all. On an air-gapped host it cannot"
+  echo "      resolve packages — point it at the internal mirror if the step below hangs:"
+  echo "        conda config --add channels https://nexus.internal/repository/conda"
+  echo "      Verify with: conda config --show-sources"
 fi
-if [ ! -f "$HOME/.pip/pip.conf" ] && [ ! -f "$HOME/.config/pip/pip.conf" ] \
-   && [ -z "${PIP_INDEX_URL:-}" ]; then
-  echo "ERROR: no pip index configured. Set PIP_INDEX_URL to the internal" >&2
-  echo "       PyPI mirror (or create ~/.config/pip/pip.conf)." >&2
-  exit 1
+_pip_configured=""
+for pip_conf in "${PIP_CONFIG_FILE:-}" "$HOME/.pip/pip.conf" "$HOME/.config/pip/pip.conf" \
+                /etc/pip.conf /etc/xdg/pip/pip.conf; do
+  if [ -n "$pip_conf" ] && [ -f "$pip_conf" ]; then
+    _pip_configured="$pip_conf"
+    break
+  fi
+done
+if [ -z "$_pip_configured" ] && [ -z "${PIP_INDEX_URL:-}" ]; then
+  echo "    ⚠ no pip index configuration found (/etc/pip.conf, ~/.config/pip/pip.conf,"
+  echo "      \$PIP_INDEX_URL). Point pip at the internal mirror if the step below hangs:"
+  echo "        pip config set global.index-url https://nexus.internal/repository/pypi/simple"
 fi
 
+echo "==> [be] conda env: $BE_ENV"
 if "$CONDA_EXE" env list | awk '{print $1}' | grep -qx "$BE_ENV"; then
-  "$CONDA_EXE" env update -n "$BE_ENV" -f "$REPO_ROOT/deploy/baremetal/environment-be.yml"
+  "$CONDA_EXE" env update -n "$BE_ENV" -f "$_CONV_DIR/environment-be.yml"
 else
-  "$CONDA_EXE" env create -f "$REPO_ROOT/deploy/baremetal/environment-be.yml"
-fi
-"$CONDA_EXE" run -n "$BE_ENV" pip install -r "$REPO_ROOT/backend/requirements.txt"
-
-# Seed config — never clobber an existing one.
-[ -f "$REPO_ROOT/.env" ] || cp "$REPO_ROOT/.env.example" "$REPO_ROOT/.env"
-mkdir -p "$REPO_ROOT/backend/data"
-if [ ! -f "$REPO_ROOT/backend/data/admin.txt" ]; then
-  cp "$REPO_ROOT/backend/admin.txt.example" "$REPO_ROOT/backend/data/admin.txt"
-  echo "seeded backend/data/admin.txt — edit it to list the real admin usernames"
+  "$CONDA_EXE" env create -n "$BE_ENV" -f "$_CONV_DIR/environment-be.yml"
 fi
 
-_need() {
-  local val
-  val="$(grep -E "^$1=" "$REPO_ROOT/.env" | head -1 | cut -d= -f2- || true)"
-  [ -n "$val" ] || echo "WARNING: $1 is empty in .env — $2"
+echo "==> [be] pip install backend/requirements.txt"
+"$CONDA_EXE" run --no-capture-output -n "$BE_ENV" \
+  python -m pip install -r "$BACKEND_DIR/requirements.txt"
+
+echo "==> [be] ensure .env (single config file at repo root)"
+ENV_FILE="$REPO_ROOT/.env"
+if [ ! -f "$ENV_FILE" ]; then
+  cp "$REPO_ROOT/.env.example" "$ENV_FILE"
+  echo "    created $ENV_FILE from .env.example — FILL IN AKTA_OCR_API_URL + AKTA_OCR_API_KEY."
+fi
+
+# ── Site-specific files, gitignored so a pull never overwrites what a deployment set.
+#    Both are seeded rather than left missing: an operator should edit a file that already
+#    exists instead of discovering they had to create one.
+echo "==> [be] seed site-specific files"
+if [ ! -f "$BACKEND_DIR/auth_service.py" ]; then
+  cp "$BACKEND_DIR/auth_service.py.example" "$BACKEND_DIR/auth_service.py"
+  echo "    created $BACKEND_DIR/auth_service.py from the template."
+  echo "    It decides what signing in MEANS here. Replace it with the bank's own module"
+  echo "    (same contract as osg-prod's), or set the AKTA_LDAP_* block in .env. Without"
+  echo "    either, logins are identity capture only — sound behind the bank's access"
+  echo "    controls, and nothing more. The server REFUSES TO START if this file is gone."
+fi
+mkdir -p "$BACKEND_DIR/data"
+ADMIN_FILE="$BACKEND_DIR/data/admin.txt"
+if [ ! -f "$ADMIN_FILE" ]; then
+  cp "$BACKEND_DIR/admin.txt.example" "$ADMIN_FILE"
+  echo "    created $ADMIN_FILE — edit it to list the real admin usernames."
+fi
+if ! grep -qE '^[[:space:]]*[^#[:space:]]' "$ADMIN_FILE"; then
+  echo "    ⚠ $ADMIN_FILE lists nobody — the admin dashboard is closed to everyone until"
+  echo "      you add usernames to it (one per line)."
+fi
+
+# Required-setting check. Warn rather than fail: an operator may inject these through the
+# environment instead of the file.
+_need() {  # _need VAR "hint"
+  local v; v="$(_grep_env "$1" "$ENV_FILE" || true)"
+  if [ -z "${v}" ] && [ -z "${!1:-}" ]; then
+    echo "    ⚠ $1 is empty in $ENV_FILE and unset in the environment — $2"
+  fi
 }
-_need AKTA_OCR_API_URL "the internal OCR API URL (the app's only outbound call)"
-_need AKTA_OCR_API_KEY "the internal OCR API x-api-key"
-_need AKTA_SESSION_SECRET "set it so restarts don't log admins out"
+_need AKTA_OCR_API_URL     "extraction cannot run — this is the app's only outbound call."
+_need AKTA_OCR_API_KEY     "the OCR API will reject every request as unauthenticated."
+_need AKTA_SESSION_SECRET  "admin dashboard sessions end at every restart."
+echo "    All config (OCR API, auth, limits, branding, deploy vars) lives in this one"
+echo "    $ENV_FILE — see .env.example. No config.yaml."
 
-chmod +x "$REPO_ROOT/deploy/baremetal/run-be.sh"
-echo "backend install done — start with deploy/baremetal/run-be.sh"
+# Make the run script executable so `./deploy/baremetal/run-be.sh` works even if the
+# checkout tracked it as non-executable (e.g. cloned over a Windows/WSL mount).
+chmod +x "$_CONV_DIR/run-be.sh" 2>/dev/null || true
+
+echo "==> [be] done. Start with:  ./deploy/baremetal/run-be.sh"

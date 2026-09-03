@@ -1,74 +1,156 @@
 #!/usr/bin/env bash
-# Shared conventions for the baremetal deploy — SOURCED by every script, never executed.
-# Mirrors osg-prod: repo-relative paths, single root .env auto-exported, conda envs,
-# nginx rendered from a heredoc with all runtime paths under $RUN_DIR.
+# conventions.sh — the single source of truth for the bare-metal deploy.
+#
+# SOURCED by every other script (never executed directly). Every value is overridable
+# from the environment via `: "${VAR:=default}"`, so nothing here is hard-wired for one
+# host. Follows osg-prod/deploy/baremetal/conventions.sh — same layout, same helpers,
+# same nginx render — with this app's names and one difference that matters: the PDF
+# goes to the OCR API as base64 inside JSON, so the body limit is sized for that.
+#
+# There is NO database step and NO migrations: jobs are JSON files under backend/data.
+set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# ── Repo paths (resolved relative to THIS file, so the checkout can live anywhere)
+_CONV_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+: "${REPO_ROOT:=$(cd "$_CONV_DIR/../.." && pwd)}"
 
-# Auto-export plain KEY=VALUE lines so child processes (python, nginx render) see them.
+# ── SINGLE config file (gitignored). Load REPO_ROOT/.env so ONE file drives backend,
+#    frontend and deploy. `set -a` auto-exports every var, so a plain KEY=VALUE line (no
+#    `export`) still reaches the child processes. Variables already in the environment
+#    win, because this load happens before the `: "${VAR:=default}"` lines below.
 if [ -f "$REPO_ROOT/.env" ]; then
   set -a
   # shellcheck disable=SC1091
   source "$REPO_ROOT/.env"
   set +a
 fi
+: "${BACKEND_DIR:=$REPO_ROOT/backend}"
+: "${FRONTEND_DIR:=$REPO_ROOT/frontend}"
+: "${FRONTEND_DIST:=$FRONTEND_DIR/dist}"
 
+# ── conda env names (swap the slug if you want; keep them overridable)
 : "${BE_ENV:=akta-be}"
 : "${FE_ENV:=akta-fe}"
+
+# ── Run dir — kept OUTSIDE the repo so the checkout stays clean. Holds the rendered
+#    nginx.conf, nginx temp dirs, the pid file and the logs.
 : "${RUN_DIR:=$HOME/akta-run}"
+
+# ── Deploy config comes from .env (see .env.example); nothing is hardcoded here. These
+#    four are required by the nginx render, so fail fast with a clear message.
+: "${BE_PORT:?not set — put it in .env (copy .env.example → .env; install-be.sh does this)}"
+: "${FE_PORT:?not set — put it in .env}"
+: "${FE_BIND:?not set — put it in .env}"
+: "${BACKEND_ORIGIN:?not set — put it in .env}"
+
+# Upstream Host header, derived from BACKEND_ORIGIN (a name-routing proxy in front of the
+# backend routes by this; the incoming Host is the frontend's, which would misroute).
+_be_no_scheme="${BACKEND_ORIGIN#*://}"
+: "${BACKEND_HOST:=${_be_no_scheme%%/*}}"
+
+# ── nginx knobs
+# The upload limit is NOT cosmetic here: a PDF reaches the OCR API base64-encoded inside a
+# JSON body, which is ~4/3 the size of the file. AKTA_MAX_UPLOAD_MB=30 therefore needs
+# ~40m of headroom at the proxy, or nginx returns 413 before the backend ever sees it.
+: "${CLIENT_MAX_BODY_SIZE:=$(( ${AKTA_MAX_UPLOAD_MB:-30} * 4 / 3 + 10 ))m}"
+: "${PROXY_READ_TIMEOUT:=600s}"      # OCR of a long akta is slow; do not cut it off
+: "${PROXY_SEND_TIMEOUT:=600s}"
+: "${NGINX_CONF:=$RUN_DIR/nginx.conf}"
+: "${MIME_TYPES:=mime.types}"        # install-fe.sh replaces this with the abs path in the env
+
+# ── conda entrypoint — allow hosts where `conda` isn't a login-shell function.
 : "${CONDA_EXE:=conda}"
 
-: "${BE_PORT:?not set — put it in .env (see .env.example)}"
-: "${FE_PORT:?not set — put it in .env (see .env.example)}"
-: "${FE_BIND:?not set — put it in .env (see .env.example)}"
-: "${BACKEND_ORIGIN:?not set — put it in .env (see .env.example)}"
+# ── env-file helpers ─────────────────────────────────────────────────────────
+# Read an UNCOMMENTED `VAR=...` value from an env file (a `# VAR=` line won't match, so a
+# default still wins). Prints the value; returns non-zero if absent.
+_grep_env() {  # _grep_env VAR FILE
+  local var="$1" file="$2"
+  [ -f "$file" ] || return 1
+  grep -E "^[[:space:]]*${var}=" "$file" | tail -n1 | cut -d= -f2-
+}
 
-FRONTEND_DIST="$REPO_ROOT/frontend/dist"
-NGINX_CONF="$RUN_DIR/nginx.conf"
-BACKEND_HOST="$(printf '%s' "$BACKEND_ORIGIN" | sed -E 's#^[a-z]+://##; s#/.*$##')"
+# Set KEY=VALUE in an env file: replace the active line if present, else append. Uses | as
+# the sed delimiter so path slashes need no escaping.
+set_env_var() {  # set_env_var KEY VALUE FILE
+  local key="$1" value="$2" file="$3"
+  touch "$file"
+  if grep -qE "^[[:space:]]*${key}=" "$file"; then
+    sed -i "s|^[[:space:]]*${key}=.*|${key}=${value}|" "$file"
+  else
+    printf '%s=%s\n' "$key" "$value" >> "$file"
+  fi
+}
 
+# ── nginx renderer ───────────────────────────────────────────────────────────
+# Render the nginx config to stdout. OUR shell vars are expanded; nginx's own runtime vars
+# are escaped as \$ so they survive into the file. All temp paths and logs point into
+# $RUN_DIR, and every path is absolute, so nginx needs no privileged/default locations.
 render_nginx_conf() {
   cat <<NGINX
-worker_processes  auto;
-error_log  $RUN_DIR/logs/error.log;
-pid        $RUN_DIR/nginx.pid;
-events { worker_connections 4096; }
+# GENERATED by install-fe.sh — do not edit; re-run install-fe.sh to regenerate.
+worker_processes  1;
+pid $RUN_DIR/nginx.pid;
+error_log $RUN_DIR/logs/error.log;
+
+events { worker_connections 1024; }
+
 http {
-  include            \$MIME_TYPES_FILE;
-  default_type       application/octet-stream;
-  access_log         $RUN_DIR/logs/access.log;
-  client_body_temp_path $RUN_DIR/tmp/client_body;
-  proxy_temp_path       $RUN_DIR/tmp/proxy;
-  fastcgi_temp_path     $RUN_DIR/tmp/fastcgi;
-  uwsgi_temp_path       $RUN_DIR/tmp/uwsgi;
-  scgi_temp_path        $RUN_DIR/tmp/scgi;
-  client_max_body_size 40m;
-  sendfile on;
+    include       $MIME_TYPES;
+    default_type  application/octet-stream;
+    access_log    $RUN_DIR/logs/access.log;
 
-  server {
-    listen $FE_BIND:$FE_PORT;
-    root   $FRONTEND_DIST;
+    client_body_temp_path $RUN_DIR/tmp/client_body;
+    proxy_temp_path       $RUN_DIR/tmp/proxy;
+    fastcgi_temp_path     $RUN_DIR/tmp/fastcgi;
+    uwsgi_temp_path       $RUN_DIR/tmp/uwsgi;
+    scgi_temp_path        $RUN_DIR/tmp/scgi;
 
-    location /api/ {
-      proxy_pass $BACKEND_ORIGIN/;
-      proxy_set_header Host $BACKEND_HOST;
-      proxy_set_header X-Real-IP \$remote_addr;
-      proxy_ssl_server_name on;
-      proxy_buffering off;
-      proxy_cache off;
-      proxy_read_timeout 600s;
-    }
+    sendfile          on;
+    keepalive_timeout 65;
+    client_max_body_size $CLIENT_MAX_BODY_SIZE;
 
-    location /assets/ {
-      add_header Cache-Control "public, max-age=31536000, immutable";
+    server {
+        listen $FE_BIND:$FE_PORT;
+        server_name _;
+
+        root $FRONTEND_DIST;
+        index index.html;
+
+        # /api → backend. The trailing slash on proxy_pass strips the /api prefix
+        # (this app's API routes live at root), exactly matching the Vite dev proxy.
+        location /api/ {
+            proxy_pass $BACKEND_ORIGIN/;
+            proxy_http_version 1.1;
+            proxy_set_header Host $BACKEND_HOST;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto \$scheme;
+            # HTTPS upstream: send SNI so the TLS handshake carries the backend hostname —
+            # name-based LB/proxy routing needs it. (Harmless when the upstream is http.)
+            proxy_ssl_server_name on;
+            # An extraction can take minutes and the job poll must stay live, so no
+            # buffering and a long read timeout.
+            proxy_buffering off;
+            proxy_cache off;
+            proxy_read_timeout $PROXY_READ_TIMEOUT;
+            proxy_send_timeout $PROXY_SEND_TIMEOUT;
+        }
+
+        # SPA cache policy: content-hashed assets are immutable and cache forever;
+        # index.html must revalidate so a rebuild is picked up on a normal refresh.
+        location /assets/ {
+            expires 1y;
+            add_header Cache-Control "public, immutable";
+        }
+        location = /index.html {
+            add_header Cache-Control "no-cache";
+        }
+        # Client-side routing: fall back to index.html.
+        location / {
+            try_files \$uri \$uri/ /index.html;
+        }
     }
-    location = /index.html {
-      add_header Cache-Control "no-cache";
-    }
-    location / {
-      try_files \$uri \$uri/ /index.html;
-    }
-  }
 }
 NGINX
 }
