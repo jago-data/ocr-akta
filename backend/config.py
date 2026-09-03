@@ -81,10 +81,6 @@ CONCURRENT_PER_USER = _positive_int("AKTA_CONCURRENT_PER_USER", 2)
 # OCR API answers, so this — not the per-user cap — is the real memory bound.
 MAX_CONCURRENT_UPLOADS = _positive_int("AKTA_MAX_CONCURRENT_UPLOADS", 40)
 MAX_UPLOAD_BYTES = _positive_int("AKTA_MAX_UPLOAD_MB", 30) * 1024 * 1024
-# How long a stop request waits for the cancellation to take effect before answering.
-# Aborting an in-flight HTTP call is near-instant, so this is a safety bound, not a delay
-# anyone should notice; without the wait the endpoint reports "stopped" too early.
-STOP_GRACE_S = _positive_int("AKTA_STOP_GRACE_S", 5)
 # How long shutdown waits for in-flight extractions before cancelling them.
 SHUTDOWN_GRACE_S = _positive_int("AKTA_SHUTDOWN_GRACE_S", 30)
 JOBS_KEEP = _positive_int("AKTA_JOBS_KEEP", 2000)       # oldest job files pruned past this count

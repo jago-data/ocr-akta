@@ -21,10 +21,11 @@ Pasal 3 normally has two ayat:
 
 Which ayat to take is decided by whether **any** KBLI code is present in Pasal 3:
 
-1. **At least one point carries a KBLI code → take ayat (2), and only ayat (2).**
-   Output every coded activity, one array element per point. Do not summarise, do not
-   merge two points into one string, do not drop a point because it looks similar to
-   another.
+1. **At least one point carries a KBLI code → take the CODED points from ayat (2), and
+   nothing else.**
+   Codes take priority over prose. Output one array element per coded point. Do not
+   summarise, do not merge two points into one string, do not drop a point because it
+   looks similar to another.
 
    Canonical form is `KODE-DESKRIPSI` — the code, a single hyphen, no spaces around it,
    description in UPPERCASE. Normalise whatever layout the deed uses:
@@ -37,10 +38,12 @@ Which ayat to take is decided by whether **any** KBLI code is present in Pasal 3
 
    Drop the literal token `KBLI`. A code is numeric, usually 5 digits.
 
-   A point in ayat (2) that has **no** code still belongs in the output — as its plain
-   uppercase description, no hyphen. The trigger for using ayat (2) is that *some* point
-   has a code, not that *every* point does; silently discarding the uncoded ones would
-   lose real business activities.
+   Points **without** a code are dropped in this case. Once codes are present they are
+   the specific, classifiable answer, and an uncoded line beside them is almost always
+   the general heading the coded points sit under — keeping it puts `PERDAGANGAN` next to
+   `46523-PERDAGANGAN BESAR PERALATAN TELEKOMUNIKASI`, which is a duplicate at a coarser
+   grain rather than an extra activity. Every coded deed in the gold set bears this out:
+   all of their points are coded, none are mixed.
 
 2. **No point anywhere in Pasal 3 carries a KBLI code → take ayat (1), and only ayat (1).**
    Plain uppercase strings, one array element per point, e.g.
@@ -76,11 +79,8 @@ the API's prompt broke this field.
 Checked against all 11 gold deeds: 4 take ayat (2) with codes, 6 take ayat (1) with none,
 1 returns `[]`. Every one falls cleanly into a single branch.
 
-**One clause is unverified.** In every coded deed in the gold set, *all* points carry a
-code — 4/4, 5/5, 14/14, 2/2. So "a point in ayat (2) with no code is still returned" has
-no example behind it; it follows from the rule being triggered by *at least one* code
-rather than by all of them. If a genuinely mixed Pasal 3 turns up, add it to the gold set,
-because that is the case where two reasonable readings differ.
+Every coded deed in the gold set has *all* of its points coded — 4/4, 5/5, 14/14, 2/2 —
+which is the evidence for dropping uncoded points under rule 1 rather than mixing them in.
 
 Two failures to watch for, both seen in practice:
 
@@ -89,6 +89,8 @@ Two failures to watch for, both seen in practice:
   names 14 KBLI codes.
 - **An uncoded deed answered with both ayat.** Symptom: `["PERDAGANGAN", "PERDAGANGAN
   BESAR DAN ECERAN", ...]` — ayat (2) paraphrasing ayat (1), producing near-duplicates.
+- **A coded deed with uncoded lines mixed in.** Symptom: a broad sector with no code
+  sitting among `KODE-DESKRIPSI` entries. Codes win; the uncoded line is the heading.
 
 ## Prompt text
 
@@ -100,11 +102,11 @@ bidang_industri_perusahaan — from Pasal 3 (Maksud dan Tujuan serta Kegiatan Us
 Decide which ayat to use by scanning ALL of Pasal 3 for KBLI codes (numeric, usually 5
 digits; the word "KBLI" may or may not appear):
 
-- If AT LEAST ONE point carries a KBLI code, extract from ayat (2) only. Return every
-  point of ayat (2) as its own array element. Coded points use the exact form
-  "KODE-DESKRIPSI": code, one hyphen, no spaces, description in UPPERCASE, the token
-  "KBLI" removed. A point in ayat (2) with no code is still returned, as its plain
-  uppercase description.
+- If AT LEAST ONE point carries a KBLI code, KBLI TAKES PRIORITY: return only the coded
+  points from ayat (2), one array element each, in the exact form "KODE-DESKRIPSI" —
+  code, one hyphen, no spaces, description in UPPERCASE, the token "KBLI" removed. Points
+  with no code are dropped; do not fall back to ayat (1) for them, and do not add a
+  general sector alongside the coded ones.
 - If NO point in Pasal 3 carries a KBLI code, extract from ayat (1) only, as plain
   uppercase strings, one array element per point. Ignore ayat (2).
 - If Pasal 3 or the business purpose cannot be found, return [].

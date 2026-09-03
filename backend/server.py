@@ -552,26 +552,27 @@ def _commit_edit(job_id: str, user: str, clean: dict) -> dict:
 
 
 async def _stop_job(job: dict) -> bool:
-    """Cancel one job if it is still running. Returns whether anything was stopped.
+    """Mark the job stopped, then cancel its task. In that order, and without waiting.
 
-    A queued job has a task too — parked on the slot semaphore — so cancelling covers
-    both waiting and running. A job the process no longer has a task for (a restart
-    happened) is marked stopped directly, since nothing else will ever finish it."""
+    Writing the status HERE rather than waiting for the task's own handler is what makes
+    stopping immediate. cancel() only requests cancellation, and it cannot always be
+    delivered at once: a job inside asyncio.to_thread — counting pages, base64-encoding
+    30 MB — receives it only when that thread returns. Waiting for that made a single stop
+    take seconds, and a logout with ten documents took the better part of a minute.
+
+    The status on disk is what every reader uses, so recording it first means the stop is
+    visible instantly. The task still writes "stopped" as it unwinds and hands its slot
+    back; both writes agree, so the order does not matter. A job whose task this process
+    no longer has (it restarted) is handled by exactly the same path."""
+    if job.get("status") not in ACTIVE_STATUSES:
+        return False
+    job.update(status="stopped", error="", stage_done=0, stage_total=0,
+               finished=jobs._now())
+    await run_in_threadpool(jobs.save, job)
     task = _running.get(job["id"])
     if task is not None and not task.done():
         task.cancel()
-        # Wait for the cancellation to actually land. cancel() only REQUESTS it: the job
-        # writes its stopped state inside its own handler, so returning immediately meant
-        # answering "stopped" while the document was still extracting, and a client that
-        # re-read it straight away saw "ocr". asyncio.wait rather than awaiting the task,
-        # which would re-raise the CancelledError into this request.
-        await asyncio.wait({task}, timeout=config.STOP_GRACE_S)
-        return True
-    if job.get("status") in ACTIVE_STATUSES:
-        job.update(status="stopped", error="", finished=jobs._now())
-        await run_in_threadpool(jobs.save, job)
-        return True
-    return False
+    return True
 
 
 @app.post("/jobs/{job_id}/stop")
@@ -632,7 +633,7 @@ async def auth_logout(username: str = ""):
     someone who has left — burning OCR API capacity on a result nobody is waiting for,
     and holding run slots that other people's uploads are queued behind."""
     user = _require_user(username)
-    mine = [j for j in await run_in_threadpool(jobs.active_for_user, user)]
+    mine = await run_in_threadpool(jobs.active_for_user, user)
     stopped = 0
     for summary in mine:
         job = await run_in_threadpool(jobs.load, summary["id"])
