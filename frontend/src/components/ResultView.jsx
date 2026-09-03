@@ -72,7 +72,7 @@ function OutsideApi({ phases, apiTotal }) {
   if (transit >= 0.05) {
     rows.push({
       label: 'kirim & antre di API',
-      why: `mengunggah ${phases.body_mb || '?'} MB base64 ke API, lalu menunggu API mulai menghitung`,
+      why: `${phases.body_mb || '?'} MB base64 dikirim ke API, lalu API belum mulai menghitung`,
       seconds: transit,
     })
   }
@@ -115,7 +115,7 @@ function StageTimings({ latency, wallClock }) {
         <span className="ml-auto text-[11.5px] text-ink-soft">
           <b className="font-semibold text-ink tabular-nums">{apiTotal.toFixed(1)}s</b> di OCR API
           {overhead > 0.05 && (
-            <> · <span className="tabular-nums">+{overhead.toFixed(1)}s</span> antrean, unggah &amp; jaringan</>
+            <> · <span className="tabular-nums">+{overhead.toFixed(1)}s</span> di luar API</>
           )}
         </span>
       </div>
