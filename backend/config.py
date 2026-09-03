@@ -14,10 +14,27 @@ except Exception:
 
 
 def _int(name: str, default: int) -> int:
+    """An int from the environment, falling back to `default` when the variable is absent,
+    empty or unparseable."""
     try:
         return int(os.environ.get(name, "").strip() or default)
     except ValueError:
         return default
+
+
+def _positive_int(name: str, default: int) -> int:
+    """As _int, but a value below 1 is refused rather than obeyed.
+
+    These numbers size semaphores and caps. Zero is a plausible typo for "no limit" and
+    would do the opposite: asyncio.Semaphore(0) is permanently locked, so every extraction
+    would wait forever with no error, no timeout and nothing in the log. A negative value
+    raises ValueError from inside asyncio, far from the setting that caused it."""
+    value = _int(name, default)
+    if value < 1:
+        print(f"  config: {name}={value} is not usable (must be >= 1) — using {default}",
+              flush=True)
+        return default
+    return value
 
 
 # --- OCR mode: "live" calls the internal OCR API; "mock" returns realistic dummy
@@ -39,10 +56,10 @@ OCR_CIF = os.environ.get("AKTA_OCR_CIF", "").strip()
 # Prefix on the referenceNo this app mints per call, so a request can be traced from this
 # app's logs into the API's.
 OCR_REFERENCE_PREFIX = os.environ.get("AKTA_OCR_REFERENCE_PREFIX", "AKTA-")
-OCR_API_TIMEOUT = _int("AKTA_OCR_TIMEOUT_S", 600)
+OCR_API_TIMEOUT = _positive_int("AKTA_OCR_TIMEOUT_S", 600)
 # Concurrent calls to the OCR API across ALL users (pool size + backpressure):
-OCR_API_CONCURRENCY = _int("AKTA_OCR_CONCURRENCY", 8)
-OCR_API_RETRIES = _int("AKTA_OCR_RETRIES", 3)
+OCR_API_CONCURRENCY = _positive_int("AKTA_OCR_CONCURRENCY", 8)
+OCR_API_RETRIES = _positive_int("AKTA_OCR_RETRIES", 3)
 
 # --- Server ---
 HOST = os.environ.get("AKTA_HOST", "0.0.0.0")
@@ -55,14 +72,14 @@ SHARED_HISTORY = os.environ.get("AKTA_SHARED_HISTORY", "").strip() == "1"
 # --- Uploads / jobs ---
 # A user may have at most this many documents processing at once; a batch that
 # would exceed it is refused whole with a warning (client pre-checks too).
-MAX_ACTIVE_PER_USER = _int("AKTA_MAX_ACTIVE_PER_USER", 5)
+MAX_ACTIVE_PER_USER = _positive_int("AKTA_MAX_ACTIVE_PER_USER", 5)
 # Process-wide admission cap: every accepted job holds its PDF in memory until the
 # OCR API answers, so this — not the per-user cap — is the real memory bound.
-MAX_CONCURRENT_UPLOADS = _int("AKTA_MAX_CONCURRENT_UPLOADS", 40)
-MAX_UPLOAD_BYTES = _int("AKTA_MAX_UPLOAD_MB", 30) * 1024 * 1024
+MAX_CONCURRENT_UPLOADS = _positive_int("AKTA_MAX_CONCURRENT_UPLOADS", 40)
+MAX_UPLOAD_BYTES = _positive_int("AKTA_MAX_UPLOAD_MB", 30) * 1024 * 1024
 # How long shutdown waits for in-flight extractions before cancelling them.
-SHUTDOWN_GRACE_S = _int("AKTA_SHUTDOWN_GRACE_S", 30)
-JOBS_KEEP = _int("AKTA_JOBS_KEEP", 2000)       # oldest job files pruned past this count
+SHUTDOWN_GRACE_S = _positive_int("AKTA_SHUTDOWN_GRACE_S", 30)
+JOBS_KEEP = _positive_int("AKTA_JOBS_KEEP", 2000)       # oldest job files pruned past this count
 
 # --- Auth ---
 # Accept any non-empty username/password when backend/auth_service.py reports no directory
@@ -70,7 +87,7 @@ JOBS_KEEP = _int("AKTA_JOBS_KEEP", 2000)       # oldest job files pruned past th
 # bank's own access controls; with it off and no LDAP configured, every login is refused.
 DEV_LOGIN = os.environ.get("AKTA_DEV_LOGIN", "1").strip() == "1"
 SESSION_SECRET = os.environ.get("AKTA_SESSION_SECRET", "").strip()
-SESSION_TTL_S = _int("AKTA_SESSION_TTL_HOURS", 12) * 3600
+SESSION_TTL_S = _positive_int("AKTA_SESSION_TTL_HOURS", 12) * 3600
 
 # --- Branding (served by GET /app so a rebrand needs no rebuild) ---
 APP_NAME = os.environ.get("AKTA_APP_NAME", "OCR Akta")
@@ -79,4 +96,4 @@ APP_TAGLINE = os.environ.get("AKTA_APP_TAGLINE", "Ekstraksi Akta Pendirian PT")
 HELPDESK_EMAIL = os.environ.get("AKTA_HELPDESK_EMAIL", "").strip()
 
 # --- Usage analytics ---
-MAX_DASHBOARD_EVENTS = _int("AKTA_MAX_DASHBOARD_EVENTS", 200000)
+MAX_DASHBOARD_EVENTS = _positive_int("AKTA_MAX_DASHBOARD_EVENTS", 200000)
