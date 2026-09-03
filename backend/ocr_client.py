@@ -382,8 +382,13 @@ def _mock_record(label: str) -> dict:
 
 
 async def _mock_extract(pdf_bytes: bytes, label: str,
-                        progress: ProgressCb | None) -> tuple[dict, int, dict]:
+                        progress: ProgressCb | None,
+                        on_reference=None) -> tuple[dict, int, dict]:
     """Walks the real progress stages with short delays so the UI flow is exercised."""
+    # Mints a reference like the live path does, so a job carries the same fields in both
+    # modes and anything reading it does not have to special-case mock.
+    if on_reference:
+        await on_reference(_reference_no(label))
     async def report(stage: str, done: int, total: int) -> None:
         if progress:
             await progress(stage, done, total)
@@ -417,7 +422,7 @@ async def extract_akta(pdf_bytes: bytes, label: str = "doc",
     own timing breakdown — operational metadata, no person data — and is {} when the API
     does not send one. Raises OcrError on any failure."""
     if config.AKTA_OCR_MODE == "mock":
-        return await _mock_extract(pdf_bytes, label, progress)
+        return await _mock_extract(pdf_bytes, label, progress, on_reference)
     return await _api_extract(pdf_bytes, label, progress, on_reference)
 
 
