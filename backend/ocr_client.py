@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import re
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable
@@ -234,7 +235,15 @@ async def _api_extract(pdf_bytes: bytes, label: str,
     if not config.OCR_API_URL:
         raise OcrError("AKTA_OCR_API_URL is not set — configure the internal "
                        "OCR API in .env (or use AKTA_OCR_MODE=mock)")
+    # Every phase is measured. Wall clock minus the API's own total_time used to be one
+    # unattributable number, and in production it reached two minutes — which of these
+    # four it was is not something anyone should have to guess at.
+    phases = {"page_count_s": 0.0, "encode_s": 0.0, "api_wait_s": 0.0,
+              "http_s": 0.0, "retry_wait_s": 0.0}
+
+    mark = time.perf_counter()
     n_pages = await asyncio.to_thread(_page_count, pdf_bytes)
+    phases["page_count_s"] = round(time.perf_counter() - mark, 2)
     if progress:
         await progress("extract", 0, 1)
 
@@ -244,23 +253,37 @@ async def _api_extract(pdf_bytes: bytes, label: str,
     client, sem = await get_client(), _get_sem()
     # Encoding is CPU-bound and a 30 MB PDF is not free — off the event loop, or every
     # other request in this process stalls for the duration.
+    mark = time.perf_counter()
     body = await asyncio.to_thread(build_request, pdf_bytes, label)
+    phases["encode_s"] = round(time.perf_counter() - mark, 2)
+    phases["body_mb"] = round(len(body["pdf"]) / (1024 * 1024), 2)
 
     resp = None
     last: Exception | None = None
     for attempt in range(config.OCR_API_RETRIES):
         try:
-            # the permit covers the call ONLY — holding it across the backoff
-            # sleep would let one bad spell drain every slot and stall everyone
-            async with sem:
+            # The permit covers the call ONLY — holding it across the backoff sleep would
+            # let one bad spell drain every slot and stall everyone. Acquire is timed on
+            # its own: a queue behind AKTA_OCR_CONCURRENCY looks exactly like a slow API
+            # from the outside, and the two want opposite fixes.
+            mark = time.perf_counter()
+            await sem.acquire()
+            phases["api_wait_s"] += round(time.perf_counter() - mark, 2)
+            try:
+                mark = time.perf_counter()
                 resp = await client.post(config.OCR_API_URL, headers=headers, json=body)
+                phases["http_s"] += round(time.perf_counter() - mark, 2)
+            finally:
+                sem.release()
             if resp.status_code < 500:
                 break  # 2xx/4xx are final answers; only 5xx is worth retrying
             last = OcrError(f"OCR API returned HTTP {resp.status_code}")
         except httpx.HTTPError as e:
             last = e
         if attempt < config.OCR_API_RETRIES - 1:
+            mark = time.perf_counter()
             await asyncio.sleep(2 * (attempt + 1))
+            phases["retry_wait_s"] += round(time.perf_counter() - mark, 2)
     if resp is None:
         raise OcrError(f"OCR API unreachable: {last}")
     if resp.status_code != 200:
@@ -273,6 +296,10 @@ async def _api_extract(pdf_bytes: bytes, label: str,
     if not isinstance(data, dict):
         raise OcrError("OCR API response is not a JSON object")
     record, latency = _unwrap(data)
+    # Carried inside latency_data so the return shape stays a 3-tuple. `http_s` minus the
+    # API's own total_time is the part neither side measures: sending the base64 body up
+    # and the API's queue before it starts its clock.
+    latency["client_phases"] = phases
 
     if progress:
         await progress("extract", 1, 1)

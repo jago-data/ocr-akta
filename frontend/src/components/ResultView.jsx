@@ -48,6 +48,50 @@ const STAGES = [
   ['parallel_prompt_time', 'Extraction prompts', 'bg-amber', 'text-amber'],
 ]
 
+// "+120s outside the API" is a symptom, not a diagnosis. These are the phases the backend
+// measures around the API call, so a slow document can be attributed rather than guessed
+// at: waiting for a concurrency permit and uploading a 40 MB body want opposite fixes, and
+// from a single overhead figure they look identical.
+const CLIENT_PHASES = [
+  ['slot_wait_s', 'antre giliran', 'AKTA_CONCURRENT_PER_USER — dokumen lain milik Anda sedang diproses'],
+  ['api_wait_s', 'antre ke API', 'AKTA_OCR_CONCURRENCY — semua slot panggilan API sedang terpakai'],
+  ['read_s', 'baca berkas', 'membaca PDF dari disk'],
+  ['page_count_s', 'hitung halaman', 'membuka PDF untuk menghitung jumlah halaman'],
+  ['encode_s', 'encode base64', 'menyiapkan PDF sebagai base64 di dalam JSON'],
+  ['retry_wait_s', 'jeda ulang', 'jeda sebelum mencoba lagi setelah API mengembalikan 5xx'],
+]
+
+function OutsideApi({ phases, apiTotal }) {
+  if (!phases) return null      // older jobs and mock mode carry no detail — say nothing
+  const rows = CLIENT_PHASES
+    .map(([key, label, why]) => ({ label, why, seconds: Number(phases[key] || 0) }))
+    .filter((row) => row.seconds >= 0.05)
+  // What the HTTP call took beyond what the API says it spent: sending the body up, and
+  // the API's own queue before its clock starts. Neither side measures this directly.
+  const transit = Math.max(0, Number(phases.http_s || 0) - apiTotal)
+  if (transit >= 0.05) {
+    rows.push({
+      label: 'kirim & antre di API',
+      why: `mengunggah ${phases.body_mb || '?'} MB base64 ke API, lalu menunggu API mulai menghitung`,
+      seconds: transit,
+    })
+  }
+  if (!rows.length) return null
+
+  return (
+    <div className="mt-2.5 border-t border-line pt-2">
+      <p className="text-[10.5px] text-ink-faint">Di luar waktu yang dilaporkan API</p>
+      <div className="mt-1 flex flex-wrap items-center gap-x-4 gap-y-1">
+        {rows.map((row) => (
+          <span key={row.label} className="text-[11.5px] text-ink-soft" title={row.why}>
+            {row.label} <b className="font-semibold tabular-nums text-ink">{row.seconds.toFixed(1)}s</b>
+          </span>
+        ))}
+      </div>
+    </div>
+  )
+}
+
 function StageTimings({ latency, wallClock }) {
   const stages = STAGES
     .map(([key, label, bar, text]) => ({ label, bar, text, seconds: Number(latency?.[key] || 0) }))
@@ -95,6 +139,8 @@ function StageTimings({ latency, wallClock }) {
           </span>
         ))}
       </div>
+
+      <OutsideApi phases={latency?.client_phases} apiTotal={apiTotal} />
     </div>
   )
 }

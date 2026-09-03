@@ -335,7 +335,9 @@ async def _run_job(job: dict) -> None:
     would otherwise pin its bytes in memory for as long as it waits, and ten 30 MB akta
     per user is 300 MB of nothing happening."""
     user = job.get("username") or ""
+    queued_at = time.time()
     slot = await _acquire_slot(user)
+    slot_wait_s = round(time.time() - queued_at, 2)
     t0 = time.time()
 
     async def progress(stage: str, done: int, total: int) -> None:
@@ -345,11 +347,19 @@ async def _run_job(job: dict) -> None:
         await run_in_threadpool(jobs.save, job)
 
     try:
+        read_at = time.time()
         pdf_bytes = await run_in_threadpool(jobs.read_pdf, job["id"])
         if pdf_bytes is None:
             raise ocr_client.OcrError("the uploaded PDF is no longer on disk")
+        read_s = round(time.time() - read_at, 2)
         record, n_pages, latency = await ocr_client.extract_akta(
             pdf_bytes, label=job["filename"], progress=progress)
+        if isinstance(latency.get("client_phases"), dict):
+            latency["client_phases"]["read_s"] = read_s
+            # How long this job sat waiting for one of its user's run slots. Measured but
+            # deliberately OUTSIDE duration_s: a queue is not the document being slow, and
+            # folding it in would make every batch look like a performance problem.
+            latency["client_phases"]["slot_wait_s"] = slot_wait_s
         company = record.get("nama_perusahaan", "")
         job.update(status="done", result=record, pages=n_pages,
                    company=company,
