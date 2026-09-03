@@ -231,7 +231,8 @@ def _unwrap(data: dict) -> tuple[dict, dict]:
 
 
 async def _api_extract(pdf_bytes: bytes, label: str,
-                       progress: ProgressCb | None) -> tuple[dict, int, dict]:
+                       progress: ProgressCb | None,
+                       on_reference=None) -> tuple[dict, int, dict]:
     if not config.OCR_API_URL:
         raise OcrError("AKTA_OCR_API_URL is not set — configure the internal "
                        "OCR API in .env (or use AKTA_OCR_MODE=mock)")
@@ -262,6 +263,12 @@ async def _api_extract(pdf_bytes: bytes, label: str,
     body = await asyncio.to_thread(build_request, pdf_bytes, label)
     phases["encode_s"] = round(time.perf_counter() - mark, 2)
     phases["body_mb"] = round(len(body["pdf"]) / (1024 * 1024), 2)
+    # Kept so a stop can name this call to the API. Cancelling aborts our request in about
+    # a millisecond and frees the local slot, but the API has the whole PDF by then and
+    # carries on unless something tells it not to — the referenceNo is that handle.
+    phases["reference_no"] = body["referenceNo"]
+    if on_reference:
+        await on_reference(body["referenceNo"])
 
     resp = None
     last: Exception | None = None
@@ -404,10 +411,40 @@ async def _mock_extract(pdf_bytes: bytes, label: str,
 
 
 async def extract_akta(pdf_bytes: bytes, label: str = "doc",
-                       progress: ProgressCb | None = None) -> tuple[dict, int, dict]:
+                       progress: ProgressCb | None = None,
+                       on_reference=None) -> tuple[dict, int, dict]:
     """One PDF in, (record, page_count, latency_data) out. The third value is the API's
     own timing breakdown — operational metadata, no person data — and is {} when the API
     does not send one. Raises OcrError on any failure."""
     if config.AKTA_OCR_MODE == "mock":
         return await _mock_extract(pdf_bytes, label, progress)
-    return await _api_extract(pdf_bytes, label, progress)
+    return await _api_extract(pdf_bytes, label, progress, on_reference)
+
+
+async def cancel_remote(reference_no: str) -> bool:
+    """Ask the OCR API to abandon a call we have stopped waiting for.
+
+    Cancelling the task aborts OUR request immediately and frees the local slot, but the
+    API already holds the whole PDF and will finish extracting it — burning capacity on a
+    result nobody will read. Only the API can stop that, so if it exposes an endpoint for
+    it, AKTA_OCR_CANCEL_URL points here and we send the referenceNo of the call.
+
+    No endpoint configured means this does nothing and says so by returning False; it is
+    not an error, just a capability the API may not have. Failures are swallowed for the
+    same reason: the document is already stopped as far as the user is concerned, and a
+    best-effort courtesy to the API must never turn into an error they see."""
+    if not config.OCR_CANCEL_URL or not reference_no:
+        return False
+    headers = {"accept": "application/json", "Content-Type": "application/json"}
+    if config.OCR_API_KEY:
+        headers[config.OCR_API_KEY_HEADER] = config.OCR_API_KEY
+    try:
+        client = await get_client()
+        resp = await client.post(
+            config.OCR_CANCEL_URL, headers=headers,
+            json={"channelId": config.OCR_CHANNEL_ID, "referenceNo": reference_no},
+            timeout=config.OCR_CANCEL_TIMEOUT_S)
+        return resp.status_code < 400
+    except Exception as e:                                    # noqa: BLE001
+        print(f"  OCR cancel for {reference_no} failed: {e}", flush=True)
+        return False

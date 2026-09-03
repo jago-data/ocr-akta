@@ -57,6 +57,12 @@ OCR_CIF = os.environ.get("AKTA_OCR_CIF", "").strip()
 # app's logs into the API's.
 OCR_REFERENCE_PREFIX = os.environ.get("AKTA_OCR_REFERENCE_PREFIX", "AKTA-")
 OCR_API_TIMEOUT = _positive_int("AKTA_OCR_TIMEOUT_S", 600)
+# Optional. Stopping a document aborts our request at once, but the OCR API keeps
+# extracting unless it is told to stop. If it exposes an endpoint for that, point this at
+# it and the referenceNo of the abandoned call is sent there. Empty = the API has no such
+# endpoint, and stopping frees this app's capacity only.
+OCR_CANCEL_URL = os.environ.get("AKTA_OCR_CANCEL_URL", "").strip()
+OCR_CANCEL_TIMEOUT_S = _positive_int("AKTA_OCR_CANCEL_TIMEOUT_S", 10)
 # Concurrent calls to the OCR API across ALL users (pool size + backpressure):
 OCR_API_CONCURRENCY = _positive_int("AKTA_OCR_CONCURRENCY", 8)
 OCR_API_RETRIES = _positive_int("AKTA_OCR_RETRIES", 3)

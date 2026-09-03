@@ -370,8 +370,13 @@ async def _run_job(job: dict) -> None:
         if pdf_bytes is None:
             raise ocr_client.OcrError("the uploaded PDF is no longer on disk")
         read_s = round(time.time() - read_at, 2)
+        async def remember_reference(reference_no: str) -> None:
+            job["reference_no"] = reference_no
+            await run_in_threadpool(jobs.save, job)
+
         record, n_pages, latency = await ocr_client.extract_akta(
-            pdf_bytes, label=job["filename"], progress=progress)
+            pdf_bytes, label=job["filename"], progress=progress,
+            on_reference=remember_reference)
         if isinstance(latency.get("client_phases"), dict):
             latency["client_phases"]["read_s"] = read_s
             # How long this job sat waiting for one of its user's run slots. Measured but
@@ -572,6 +577,13 @@ async def _stop_job(job: dict) -> bool:
     task = _running.get(job["id"])
     if task is not None and not task.done():
         task.cancel()
+    # Cancelling aborts our side in about a millisecond and returns the slot, but the API
+    # is holding the whole PDF and will finish extracting it unless told otherwise. If it
+    # offers an endpoint for that, this is where it hears about it. Fire-and-forget: the
+    # document is stopped either way, and the user should not wait on a courtesy call.
+    reference_no = job.get("reference_no") or ""
+    if reference_no and config.OCR_CANCEL_URL:
+        asyncio.get_running_loop().create_task(ocr_client.cancel_remote(reference_no))
     return True
 
 
